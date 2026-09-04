@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections import deque
 import logging
 import math
 import os
@@ -242,6 +243,11 @@ class Daemon:
         self._level_task: asyncio.Task | None = None
         self._pending_level = 0.0
         self._pending_bands = [0.0, 0.0, 0.0, 0.0]
+        # Output levels waiting for the moment they are actually heard, as
+        # (due, level, bands). Thirty seconds of audio at 20 ms a chunk is well
+        # past anything the player will hold, so the bound is a backstop rather
+        # than a working limit.
+        self._output_levels: deque[tuple[float, float, list[float]]] = deque(maxlen=1500)
         self._stopping = asyncio.Event()
 
     # -- preferences ----------------------------------------------------------
@@ -505,16 +511,13 @@ class Daemon:
         # question.
         held.add(self.autogain.apply(chunk), passed)
 
-        # The figure shows what whisper is given, not what the microphone
-        # delivered. Those became different things once the gain was calibrated
-        # down: the level and the bands are measured on the raw chunk, before
-        # AutoGain, so a microphone set correctly for the ADC read as a figure
-        # that barely moved while the transcript was perfectly good. Scaling by
-        # the same gain the audio gets keeps the two honest about each other,
-        # and follows any microphone rather than a constant picked on one.
-        shown = self.autogain.gain
-        self._pending_level = max(self._pending_level, min(1.0, level * shown))
-        self._pending_bands = [min(1.0, b * shown) for b in bands]
+        # `level` is already the meter — decibels across a fixed window, which
+        # is microphone-independent on its own. An earlier version multiplied it
+        # by AutoGain's gain here, which was wrong twice over: AutoGain
+        # normalises speech *to a target*, so the figure became a compressor
+        # reading the same however loudly you spoke, and it pinned at 1.0.
+        self._pending_level = max(self._pending_level, level)
+        self._pending_bands = bands
 
         if self._dump is not None:
             self._dump.write(chunk)
@@ -552,11 +555,21 @@ class Daemon:
             return True
         return asyncio.get_running_loop().time() < self._quiet_after
 
-    def _on_output_level(self, level: float, bands: list[float]) -> None:
-        self._pending_level = max(self._pending_level, level)
-        # While the assistant speaks, its own voice drives the figure — the
-        # panel should look like it is talking, not like it is waiting.
-        self._pending_bands = bands
+    def _on_output_level(self, level: float, bands: list[float], due: float) -> None:
+        """One chunk handed to the speaker, and when it will be heard.
+
+        Queued rather than drawn. While the assistant speaks its own voice
+        drives the figure — the panel should look like it is talking — but the
+        writes arrive nothing like the sound does: Kokoro synthesises about
+        three times faster than playback, so they come in bursts that fill the
+        player and then stop while it drains.
+        """
+        if level <= 0.0 and not any(bands):
+            # A flush: what was scheduled is gone.
+            self._output_levels.clear()
+            self._pending_bands = [0.0, 0.0, 0.0, 0.0]
+            return
+        self._output_levels.append((due, level, bands))
 
     async def _level_pump(self) -> None:
         """Coalesce levels into a steady, low-rate stream for the waveform."""
@@ -570,6 +583,17 @@ class Daemon:
                 if self.state == "speaking" and not self._local_speech and not self.speaker.playing:
                     self._set_state("idle")
 
+                # Whatever reached the speakers during this tick. The loudest
+                # of them rather than the newest: a tick spans more than one
+                # chunk, and the quiet half of a syllable must not erase the
+                # loud half.
+                now = asyncio.get_running_loop().time()
+                while self._output_levels and self._output_levels[0][0] <= now:
+                    _, level, bands = self._output_levels.popleft()
+                    if level >= self._pending_level:
+                        self._pending_level = level
+                        self._pending_bands = bands
+
                 self.server.broadcast(
                     {
                         "type": "level",
@@ -578,6 +602,12 @@ class Daemon:
                     }
                 )
                 self._pending_level = 0.0
+                # Reset with the level rather than left standing. A tick with no
+                # chunk used to ship rms=0 beside the previous tick's bands, and
+                # the figure gates on the voice state rather than on the level —
+                # so it kept its height and kept animating, frozen in one
+                # timbre. It looked alive and wrong.
+                self._pending_bands = [0.0, 0.0, 0.0, 0.0]
         except asyncio.CancelledError:
             pass
 

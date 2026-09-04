@@ -52,9 +52,21 @@ def _pdeathsig_argv(tool: str) -> list[str]:
 # complains once per buffer for the length of a conversation.
 _STDERR_MAX_BYTES = 8 * 1024
 
-# Roughly the RMS of comfortable speech in 16-bit samples. Dividing by it maps
-# normal talking to most of the meter without clipping on a loud laugh.
-_FULL_SCALE = 6000.0
+# The window the meter draws, in decibels below full scale.
+#
+# A meter has to be logarithmic, for the same reason every meter ever built is:
+# loudness is perceived that way, and speech has a large crest factor. Measured
+# over nineteen real turns on this machine, the linear scale that used to be
+# here put the median of a spoken turn at 0.20 and clamped the 95th percentile
+# at 1.0 on ten of them — a figure that hugged the bottom and spiked off the
+# top, which reads as one that barely moves.
+#
+# The same turns across this window: silence and a quiet room at 0.00, the
+# median at 0.43, the 95th percentile at 0.67, and nothing clamped until a
+# genuine peak. -50 dB is far enough down that room noise sits on the floor
+# without a gate, and close enough that an ordinary voice is not squeezed into
+# the top of the range.
+_METER_FLOOR_DB = -50.0
 
 
 # Four bands across the speech range. Loudness alone makes a waveform that
@@ -97,11 +109,11 @@ def clipped_samples(pcm: bytes, ceiling: int = 32000) -> int:
 def rms_full_scale(pcm: bytes) -> float:
     """RMS of a chunk against the real ceiling of PCM16, 0..1.
 
-    Kept separate from `rms_level` on purpose. That one is normalised against
-    `_FULL_SCALE`, a number chosen so the waveform on screen looks lively — it
-    reaches 1.0 at a level that is merely loud, not clipped. Reading it as
-    headroom cost half a day of wrong diagnoses. Anything reasoning about
-    actual signal strength wants this one.
+    **The measurement.** Linear amplitude, and the only one of the two that
+    means anything: the gate, AutoGain, the clipping check and `Held.levels`
+    all reason about this. `rms_level` below is the meter, and reading one as
+    the other has now cost time twice — once as headroom that was not headroom,
+    once as a display that was blamed on a microphone that was fine.
     """
     samples = _samples_of(pcm)
     if not samples:
@@ -110,16 +122,26 @@ def rms_full_scale(pcm: bytes) -> float:
 
 
 def rms_level(pcm: bytes) -> float:
-    """Loudness of a PCM16 chunk on the display scale, 0..1 — for the waveform.
+    """What the waveform draws, 0..1 — a meter, not a measurement.
 
-    Hand-rolled because audioop was removed in Python 3.13 — and this is four
-    lines, so there is nothing to miss.
+    Decibels mapped onto the window, so speech spreads across the figure
+    instead of clamping against the top of it. Nothing else may use this: it is
+    deliberately not proportional to signal strength, and anything asking how
+    loud something really is wants `rms_full_scale`.
+
+    Microphone-independent, which the constant it replaced was not — that one
+    was picked for one microphone at one gain, and setting the capture gain
+    correctly is what finally showed it up.
+
+    Hand-rolled because audioop was removed in Python 3.13.
     """
-    samples = _samples_of(pcm)
-    if not samples:
+    level = rms_full_scale(pcm)
+    if level <= 0.0:
         return 0.0
-    mean_square = sum(s * s for s in samples) / len(samples)
-    return min(1.0, math.sqrt(mean_square) / _FULL_SCALE)
+    db = 20.0 * math.log10(level)
+    if db <= _METER_FLOOR_DB:
+        return 0.0
+    return min(1.0, (db - _METER_FLOOR_DB) / -_METER_FLOOR_DB)
 
 
 class BandAnalyser:
@@ -757,7 +779,8 @@ class Speaker:
     WRITE_TIMEOUT = 10.0
 
     def __init__(
-        self, cfg: Config, on_level: Callable[[float, list[float]], None] | None = None
+        self, cfg: Config,
+        on_level: Callable[[float, list[float], float], None] | None = None,
     ) -> None:
         self.cfg = cfg
         self.on_level = on_level
@@ -831,9 +854,17 @@ class Speaker:
 
             now = asyncio.get_running_loop().time()
             seconds = len(pcm) / (self.cfg.sample_rate * self.cfg.channels * 2)
-            self._play_until = max(self._play_until, now) + seconds
+            # When this chunk starts being heard, which is not now: whatever is
+            # already in the player has to play out first.
+            starts_at = max(self._play_until, now)
+            self._play_until = starts_at + seconds
         if self.on_level:
-            self.on_level(rms_level(pcm), self._bands.push(pcm))
+            # Stamped with when it will be heard rather than when it was
+            # written. The voice is synthesised about three times faster than it
+            # plays, so writes arrive in bursts that fill the player and then
+            # block on drain — and a figure driven by those bursts twitched once
+            # and sat still while a whole sentence came out of the speakers.
+            self.on_level(rms_level(pcm), self._bands.push(pcm), starts_at)
 
     async def flush_now(self) -> None:
         """Drop audio that is already queued, by replacing the player.
@@ -854,7 +885,10 @@ class Speaker:
             # here in well under a millisecond.
             await terminate_and_reap(proc, grace=self.STOP_GRACE)
         if self.on_level:
-            self.on_level(0.0, [0.0, 0.0, 0.0, 0.0])
+            # Due now: the audio that was scheduled has been thrown away, so
+            # nothing queued against it should still be drawn.
+            self.on_level(0.0, [0.0, 0.0, 0.0, 0.0],
+                          asyncio.get_running_loop().time())
 
     async def stop(self) -> None:
         async with self._lock:
