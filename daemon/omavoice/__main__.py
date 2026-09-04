@@ -41,6 +41,7 @@ from .audio import (
 from .brain import Brain
 from .config import Config
 from .realtime import RealtimeSession
+from .speak import speak as speak_locally
 
 log = logging.getLogger("omavoice")
 
@@ -51,6 +52,9 @@ _LEVEL_INTERVAL = 0.05
 # A waterfall line is a sentence. Anything past this is not a longer line,
 # it is a backend or a transcriber having a bad day at our expense.
 _MAX_EVENT_TEXT = 4000
+
+# Four seconds of 24 kHz mono PCM16, in the 960-byte chunks the speaker is fed.
+_PLAY_QUEUE_CHUNKS = 200
 
 # While the assistant is speaking, the bar for what counts as speech goes up.
 # The echo canceller measures about -41 dB on this hardware, but it converges
@@ -167,8 +171,18 @@ class Daemon:
         # connection with "keepalive ping timeout" mid-sentence. The model
         # streams an answer far faster than it plays, so a long answer made
         # this near-certain.
-        self._play_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        # Bounded, because the local voice is a faster producer than the wire
+        # ever was: Kokoro synthesises at about a third of playback time, so an
+        # unbounded queue would hold a whole answer in memory before a word of
+        # it had been heard. Four seconds of audio is enough to keep pw-play
+        # fed and little enough to drop instantly on barge-in.
+        self._play_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_PLAY_QUEUE_CHUNKS)
         self._play_task: asyncio.Task | None = None
+        # True while a local answer is being synthesised. The level pump ends
+        # `speaking` when the speaker falls silent, and at the start of an
+        # utterance it has been silent all along — the first sample is a second
+        # or so away, in another process.
+        self._local_speech = False
 
         # What the agent is doing, while it is doing it. Not kept and not
         # replayed to a late-joining panel: it is a window onto a process that
@@ -529,7 +543,9 @@ class Daemon:
                 await asyncio.sleep(_LEVEL_INTERVAL)
 
                 # The one place that knows the answer has stopped being heard.
-                if self.state == "speaking" and self.session and not self.speaker.playing:
+                # No session test: the voice is local now, and an answer
+                # spoken without one still has to end.
+                if self.state == "speaking" and not self._local_speech and not self.speaker.playing:
                     self._set_state("listening")
 
                 self.server.broadcast(
@@ -568,6 +584,49 @@ class Daemon:
             pass
         except Exception:  # noqa: BLE001
             log.exception("playback pump died")
+
+    async def say(self, text: str) -> None:
+        """Speak a line locally, and stay in `speaking` until it has been heard."""
+        said = " ".join(str(text or "").split())
+        if not said:
+            return
+        self._local_speech = True
+        try:
+            await self._ensure_playback()
+            self._set_state("speaking")
+            self._emit("said", said)
+            self.server.broadcast(
+                {"type": "transcript", "role": "assistant", "text": said, "final": True}
+            )
+            await speak_locally(said, self.cfg.voice, self._enqueue_audio)
+            # The worker has ended, but what it wrote is still in the pipe.
+            while self.speaker.playing and not self.paused:
+                await asyncio.sleep(0.1)
+        finally:
+            self._local_speech = False
+        self._set_state("listening" if self.session else "idle")
+
+    async def _ensure_playback(self) -> None:
+        """Have a speaker and a pump, whether or not a session opened them.
+
+        start_session used to be the only thing that did this, which was true
+        while the only audio came off the wire.
+        """
+        await self.speaker.start()
+        if self._play_task is None or self._play_task.done():
+            self._play_task = asyncio.create_task(self._play_pump(), name="playback")
+
+    async def _enqueue_audio(self, pcm: bytes) -> None:
+        """Hand one chunk to the speaker, waiting when the queue is full.
+
+        Waiting is the point: the queue's size is what keeps a whole answer out
+        of memory, and the worker blocks on its own pipe while we are behind.
+        """
+        if self.paused:
+            return
+        if self._voice_dump is not None:
+            self._voice_dump.write(pcm)
+        await self._play_queue.put(pcm)
 
     def _drop_queued_audio(self) -> None:
         """Throw away audio that has not reached the speaker yet."""
@@ -1153,11 +1212,10 @@ class Daemon:
             return {"ok": True, "spoken": answer.spoken, **answer.as_ui_payload()}
 
         if command == "say":
-            # Debug handle: make the assistant speak a specific line, so echo
-            # behaviour can be tested without a person in the room.
-            if not self.session:
-                return {"ok": False, "error": "no session"}
-            await self.session.say(str(message.get("text") or "Проверка связи."))
+            # Debug handle: make the assistant speak a specific line, so the
+            # voice can be tested without a person in the room. No session is
+            # needed for it any more — the voice runs on this machine.
+            await self.say(str(message.get("text") or "Проверка связи."))
             return {"ok": True}
 
         if command == "audio":

@@ -21,21 +21,39 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 ANSWER_SCHEMA = PACKAGE_DIR.parent / "schemas" / "answer.json"
 
 
-# The voices the Realtime API offers, and — the part that actually matters
-# here — which grammatical gender each one has to speak in. Russian marks
-# gender on past-tense verbs, so a female voice saying "посмотрел" is not a
-# stylistic wobble: it sounds like a different person mid-sentence.
+# Kokoro's English voices, and — the part that still matters — which
+# grammatical gender each speaks in, for languages that mark it on the verb.
+# The prefix is Kokoro's own: a for American, b for British, f for female,
+# m for male. The other languages it ships are left out; the assistant answers
+# in English because that is what its voices can pronounce.
 VOICES: tuple[tuple[str, str, str], ...] = (
-    ("marin", "female", "Марин"),
-    ("coral", "female", "Корал"),
-    ("shimmer", "female", "Шиммер"),
-    ("sage", "female", "Сейдж"),
-    ("cedar", "male", "Седар"),
-    ("ash", "male", "Эш"),
-    ("ballad", "male", "Баллад"),
-    ("echo", "male", "Эхо"),
-    ("verse", "male", " Верс"),
-    ("alloy", "male", "Эллой"),
+    ("af_heart", "female", "Heart"),
+    ("af_bella", "female", "Bella"),
+    ("af_nicole", "female", "Nicole"),
+    ("af_aoede", "female", "Aoede"),
+    ("af_kore", "female", "Kore"),
+    ("af_sarah", "female", "Sarah"),
+    ("af_nova", "female", "Nova"),
+    ("af_sky", "female", "Sky"),
+    ("af_alloy", "female", "Alloy"),
+    ("af_jessica", "female", "Jessica"),
+    ("af_river", "female", "River"),
+    ("am_michael", "male", "Michael"),
+    ("am_fenrir", "male", "Fenrir"),
+    ("am_puck", "male", "Puck"),
+    ("am_echo", "male", "Echo"),
+    ("am_eric", "male", "Eric"),
+    ("am_liam", "male", "Liam"),
+    ("am_onyx", "male", "Onyx"),
+    ("am_adam", "male", "Adam"),
+    ("bf_emma", "female", "Emma"),
+    ("bf_isabella", "female", "Isabella"),
+    ("bf_alice", "female", "Alice"),
+    ("bf_lily", "female", "Lily"),
+    ("bm_george", "male", "George"),
+    ("bm_fable", "male", "Fable"),
+    ("bm_daniel", "male", "Daniel"),
+    ("bm_lewis", "male", "Lewis"),
 )
 
 VOICE_GENDER = {name: gender for name, gender, _ in VOICES}
@@ -116,7 +134,7 @@ class Config:
     # is mode 600 and is opened only here.
     api_key: str = field(default_factory=lambda: read_api_key())
     model: str = field(default_factory=lambda: os.environ.get("OMAVOICE_MODEL", "gpt-realtime-2.1-mini"))
-    voice: str = field(default_factory=lambda: os.environ.get("OMAVOICE_VOICE", "marin"))
+    voice: str = field(default_factory=lambda: os.environ.get("OMAVOICE_VOICE", "af_heart"))
     transcription_model: str = field(
         default_factory=lambda: os.environ.get("OMAVOICE_TRANSCRIBE", "gpt-4o-transcribe")
     )
