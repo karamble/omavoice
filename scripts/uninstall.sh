@@ -3,10 +3,11 @@
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV="${XDG_DATA_HOME:-$HOME/.local/share}/omavoice/venv"
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/omavoice"
+VENV="$DATA/venv"
+MODELS="$DATA/kokoro"
 UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/omavoice.service"
 ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omavoice/env"
-KEY_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omavoice/key"
 PW_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/99-omavoice-echo-cancel.conf"
 LINK="$HOME/.local/bin/omavoice-ctl"
 
@@ -17,7 +18,7 @@ rm -f "$UNIT"
 systemctl --user daemon-reload
 note "service stopped and removed"
 
-rm -rf "$(dirname "$VENV")"
+rm -rf "$VENV"
 note "virtualenv removed"
 
 if [[ -L "$LINK" && "$(readlink -f "$LINK")" == "$PLUGIN_DIR/bin/omavoice-ctl" ]]; then
@@ -26,13 +27,14 @@ if [[ -L "$LINK" && "$(readlink -f "$LINK")" == "$PLUGIN_DIR/bin/omavoice-ctl" ]
 fi
 
 printf '\n\033[1mLeft in place on purpose:\033[0m\n'
-# The key moved into a file of its own, and the old line still pointed at
-# the one it left. Somebody deleting what they were told to delete would
-# have kept their key and believed they had removed it.
-[[ -f "$KEY_FILE" ]] && note "$KEY_FILE — your API key"
-[[ -f "$ENV_FILE" ]] && note "$ENV_FILE — settings (and an older key, if you never re-saved it)"
+# The model especially. It is 339 MB over a slow link and it is not
+# configuration — deleting it as a side effect of removing a virtualenv, which
+# is what `dirname $VENV` used to do here, meant an uninstall-reinstall cost a
+# third of a gigabyte for no reason anybody could see.
+[[ -d "$MODELS" ]]   && note "$MODELS — the voice model, 339 MB"
+[[ -f "$ENV_FILE" ]] && note "$ENV_FILE — your settings"
 [[ -f "$PW_CONF" ]]  && note "$PW_CONF — echo cancellation, which other things may now rely on"
-note "Delete either by hand if you are sure."
+note "Delete any of them by hand if you are sure."
 
 printf '\n\033[1mThe plugin folder itself:\033[0m\n'
 note "omarchy plugin remove io.github.baranskyi.omavoice"

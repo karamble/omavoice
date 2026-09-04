@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# The hotkey. `down` on press, `up` on release — one command per edge, so the
+# Hyprland binding stays a single exec and not a shell pipeline.
+#
+# Pressing does two things, in this order: it puts the panel on screen, and it
+# opens the microphone. The order matters and the reverse of it is worse — a
+# question is already being recorded by the time the window is drawn, so
+# nothing is lost while the shell gets around to it.
+#
+# It opens rather than toggles. `omarchy-shell shell` offers `toggle` and
+# `hide` but no `open`, and a toggle on the press edge would close the panel
+# for anyone who held the key while it was already up. The plugin exposes its
+# own IPC target whose `open` is idempotent, so this is the right door: holding
+# the key always ends with the window on screen, never without it.
+set -euo pipefail
+
+PLUGIN_ID="io.github.baranskyi.omavoice"
+
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  SELF="$(readlink -f "$SELF")"
+done
+PLUGIN_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+case "${1:-}" in
+  down)
+    # Best-effort and never fatal: the shell may be restarting, and a panel
+    # that failed to appear is not a reason to refuse to hear the question.
+    # `-q` returns success even when the shell, the target or the method is
+    # unavailable, which is exactly the contract wanted here.
+    omarchy-shell -q "$PLUGIN_ID" open || true
+    exec "$PLUGIN_DIR/bin/omavoice-ctl" ptt down
+    ;;
+  up)
+    exec "$PLUGIN_DIR/bin/omavoice-ctl" ptt up
+    ;;
+  *)
+    echo "usage: omavoice-ptt down|up" >&2
+    exit 2
+    ;;
+esac

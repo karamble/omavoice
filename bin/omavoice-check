@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# What this build needs, and whether it is here.
+#
+# Every dependency this plugin gained when the voice came home fails silently.
+# voxtype missing is a warning in a log and an empty transcript, so the key
+# press does nothing. The Kokoro model missing is an exit code on a worker's
+# stderr, so the panel says "speaking" and no sound comes out. Neither reaches
+# the interface, and there was nothing anywhere that simply listed what is
+# required. This is that list, and the wizard draws it.
+#
+# In bash rather than Python because python3 is one of the things being
+# checked, and read-only because a check that changes something is not a check.
+# It never needs the daemon: on a fresh machine there is not one yet.
+#
+# Each row carries a `fix` and a `runnable`. Runnable means unprivileged and
+# safe for the wizard to run for you — a virtualenv in your own home, a model
+# download, a config file in ~/.config. Anything needing sudo, and anything
+# that edits a file you wrote yourself, is shown to copy and never run: this
+# program does not install packages or rewrite your keybindings behind your
+# back.
+set -uo pipefail
+
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do SELF="$(readlink -f "$SELF")"; done
+PLUGIN_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/omavoice"
+VENV="$DATA/venv"
+MODELS="$DATA/kokoro"
+UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/omavoice.service"
+PW_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/99-omavoice-echo-cancel.conf"
+BINDINGS="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/bindings.lua"
+SETUP="bash $PLUGIN_DIR/scripts/setup.sh"
+
+# Pinned, and checked rather than trusted. These are the two files the voice
+# is; a wrong one is a crash inside onnxruntime with nothing pointing here.
+ONNX_SHA=7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5
+VOICES_SHA=bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d
+
+ROWS=()
+
+# JSON by hand, because the alternative is depending on jq to report whether
+# dependencies are installed. Only these five fields ever carry text we did not
+# write, and all of them are paths and command names, but quote everything
+# anyway — a home directory can contain a quote.
+esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g'; }
+
+row() { # id group label ok detail note fix runnable
+  ROWS+=("$(printf '{"id":"%s","group":"%s","label":"%s","ok":%s,"detail":"%s","note":"%s","fix":"%s","runnable":%s}' \
+    "$(esc "$1")" "$(esc "$2")" "$(esc "$3")" "$4" "$(esc "$5")" "$(esc "$6")" "$(esc "$7")" "$8")")
+}
+
+# Only the four directories the daemon itself will execute from. `devices.py`
+# resolves every binary this way and ignores PATH entirely, so a check that
+# consulted PATH would pass on a machine the daemon then refuses to run on.
+trusted() {
+  local name="$1" p
+  for p in /usr/bin /bin /usr/sbin /sbin; do
+    [[ -x "$p/$name" ]] && { printf '%s' "$p/$name"; return 0; }
+  done
+  return 1
+}
+
+# --- hearing ----------------------------------------------------------------
+
+if where="$(trusted voxtype)"; then
+  row voxtype hearing "voxtype — the ears" true "$where" \
+    "whisper, on the CPU. About a fifth of real time." "" false
+else
+  row voxtype hearing "voxtype — the ears" false "not in /usr/bin" \
+    "Transcribes what you say, locally. Without it the key press records and nothing comes back." \
+    "sudo pacman -S voxtype-bin" false
+fi
+
+missing_audio=()
+for tool in pw-record pw-play pactl setpriv; do
+  trusted "$tool" >/dev/null || missing_audio+=("$tool")
+done
+if [[ ${#missing_audio[@]} -eq 0 ]]; then
+  row audio hearing "Audio and process tools" true "pw-record, pw-play, pactl, setpriv" \
+    "" "" false
+else
+  row audio hearing "Audio and process tools" false "missing: ${missing_audio[*]}" \
+    "PipeWire records and plays; setpriv is what makes a helper die with the daemon rather than outliving it." \
+    "sudo pacman -S pipewire-audio libpulse util-linux" false
+fi
+
+# Two halves, and the second is the one that matters. The file being in place
+# says the drop-in was installed; the node existing says PipeWire has actually
+# read it, which it only does on restart.
+if [[ -f "$PW_CONF" ]]; then
+  if trusted pactl >/dev/null && pactl list short sources 2>/dev/null | grep -q echo-cancel-source; then
+    row echo-cancel hearing "Echo cancelling and noise suppression" true "echo-cancel-source is loaded" \
+      "" "" false
+  else
+    row echo-cancel hearing "Echo cancelling and noise suppression" false \
+      "installed, but PipeWire has not loaded it yet" \
+      "It reads the file only when it starts." \
+      "systemctl --user restart pipewire" false
+  fi
+else
+  row echo-cancel hearing "Echo cancelling and noise suppression" false "not installed" \
+    "Two jobs, and the second is the one you notice: it stops the assistant hearing its own voice, and it suppresses room noise. Without it a quiet room transcribes as sentences nobody said." \
+    "$SETUP pipewire" true
+fi
+
+# --- speaking ---------------------------------------------------------------
+
+py="$(trusted python3 || true)"
+if [[ -n "$py" ]] && "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+  row python speaking "Python 3.11 or newer" true "$("$py" -V 2>&1)" "" "" false
+elif [[ -n "$py" ]]; then
+  row python speaking "Python 3.11 or newer" false "$("$py" -V 2>&1) is too old" \
+    "The daemon runs on it." "sudo pacman -S python" false
+else
+  row python speaking "Python 3.11 or newer" false "no python3" \
+    "The daemon runs on it." "sudo pacman -S python" false
+fi
+
+if [[ -x "$VENV/bin/python" ]] \
+  && "$VENV/bin/python" -c 'import onnxruntime, kokoro_onnx, numpy' 2>/dev/null; then
+  row venv speaking "The voice's Python packages" true "onnxruntime, kokoro-onnx, numpy" \
+    "" "" false
+elif [[ -x "$VENV/bin/python" ]]; then
+  row venv speaking "The voice's Python packages" false "the virtualenv is there but incomplete" \
+    "onnxruntime, kokoro-onnx and numpy, installed from a lockfile with a hash for every wheel." \
+    "$SETUP venv" true
+else
+  row venv speaking "The voice's Python packages" false "no virtualenv at $VENV" \
+    "onnxruntime, kokoro-onnx and numpy, installed from a lockfile with a hash for every wheel. Nothing is installed system wide and nothing asks for sudo." \
+    "$SETUP venv" true
+fi
+
+# Size before hash: sha256 on 311 MB takes about a second, and this runs on a
+# timer while the card is open.
+model_ok=false
+if [[ -f "$MODELS/kokoro-v1.0.onnx" && -f "$MODELS/voices-v1.0.bin" ]]; then
+  if [[ "$(stat -c%s "$MODELS/kokoro-v1.0.onnx")" == 325532387 \
+     && "$(stat -c%s "$MODELS/voices-v1.0.bin")" == 28214398 ]]; then
+    model_ok=true
+  fi
+fi
+if [[ "$model_ok" == true ]]; then
+  row kokoro-model speaking "Kokoro voice model" true "in $MODELS" \
+    "339 MB, already downloaded." "" false
+elif [[ -f "$MODELS/kokoro-v1.0.onnx" || -f "$MODELS/voices-v1.0.bin" ]]; then
+  row kokoro-model speaking "Kokoro voice model" false "a file is missing or the wrong size" \
+    "Downloaded once and checked against a pinned sha256." "$SETUP models" true
+else
+  row kokoro-model speaking "Kokoro voice model" false "not found in $MODELS" \
+    "339 MB, downloaded once and checked against a pinned sha256. This is the voice itself — it runs on the CPU, spawned for each answer and gone again." \
+    "$SETUP models" true
+fi
+
+# --- thinking ---------------------------------------------------------------
+
+agents=()
+command -v claude >/dev/null 2>&1 && agents+=(claude)
+command -v codex  >/dev/null 2>&1 && agents+=(codex)
+if [[ ${#agents[@]} -gt 0 ]]; then
+  row agent thinking "A local agent" true "${agents[*]}" \
+    "This is what actually answers. Whatever it can reach, this can use." "" false
+else
+  row agent thinking "A local agent" false "neither claude nor codex is on your PATH" \
+    "This is what actually answers — nothing else here knows anything. Install whichever you already use." \
+    "https://claude.com/product/claude-code" false
+fi
+
+# --- running ----------------------------------------------------------------
+
+if [[ -f "$UNIT" ]] && systemctl --user is-active --quiet omavoice 2>/dev/null; then
+  row daemon running "The daemon" true "running as a user service" "" "" false
+elif [[ -f "$UNIT" ]]; then
+  row daemon running "The daemon" false "installed but not running" \
+    "It starts on login once enabled." \
+    "systemctl --user enable --now omavoice" true
+else
+  row daemon running "The daemon" false "no user service installed" \
+    "Everything runs through it: the microphone, whisper, the agent and the voice." \
+    "$SETUP unit && systemctl --user enable --now omavoice" true
+fi
+
+if [[ -f "$BINDINGS" ]] && grep -q omavoice-ptt "$BINDINGS" 2>/dev/null; then
+  row hotkey running "The F10 key" true "bound in bindings.lua" \
+    "Hold it anywhere to talk." "" false
+else
+  # Never runnable. This is a file the person wrote, and a program that edits
+  # your keybindings without being asked has earned every bit of the mistrust
+  # that follows.
+  row hotkey running "The F10 key" false "no binding found in bindings.lua" \
+    "Hold to talk, from anywhere. Add these two lines to ~/.config/hypr/bindings.lua — press and release are separate bindings." \
+    "o.bind(\"F10\", \"Ask the assistant\", \"$PLUGIN_DIR/bin/omavoice-ptt down\")
+o.bind(\"F10\", \"Ask the assistant (release)\", \"$PLUGIN_DIR/bin/omavoice-ptt up\", { release = true })" false
+fi
+
+# ----------------------------------------------------------------------------
+
+if [[ "${1:-}" == "--json" ]]; then
+  printf '['
+  for i in "${!ROWS[@]}"; do
+    [[ $i -gt 0 ]] && printf ','
+    printf '%s' "${ROWS[$i]}"
+  done
+  printf ']\n'
+  exit 0
+fi
+
+# Human output, for a terminal. The wizard uses --json.
+fail=0
+for r in "${ROWS[@]}"; do
+  ok=$(printf '%s' "$r" | sed -n 's/.*"ok":\([a-z]*\).*/\1/p')
+  label=$(printf '%s' "$r" | sed -n 's/.*"label":"\([^"]*\)".*/\1/p')
+  detail=$(printf '%s' "$r" | sed -n 's/.*"detail":"\([^"]*\)".*/\1/p')
+  fix=$(printf '%s' "$r" | sed -n 's/.*"fix":"\(.*\)","runnable".*/\1/p')
+  if [[ "$ok" == true ]]; then
+    printf '  \033[32m✓\033[0m %-38s %s\n' "$label" "$detail"
+  else
+    fail=$((fail + 1))
+    printf '  \033[31m✗\033[0m %-38s %s\n' "$label" "$detail"
+    [[ -n "$fix" ]] && printf '      %b\n' "$fix"
+  fi
+done
+[[ $fail -eq 0 ]] && printf '\neverything omavoice needs is here.\n'
+exit 0
