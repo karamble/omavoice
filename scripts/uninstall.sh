@@ -37,5 +37,5 @@ printf '\n\033[1mLeft in place on purpose:\033[0m\n'
 note "Delete any of them by hand if you are sure."
 
 printf '\n\033[1mThe plugin folder itself:\033[0m\n'
-note "omarchy plugin remove io.github.baranskyi.omavoice"
+note "omarchy plugin remove karamble.omavoice"
 echo

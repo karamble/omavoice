@@ -8,7 +8,7 @@
 # symlinks anywhere inside a plugin folder — so `watch` copies on every save.
 # The shell has its own inotify watcher and reloads QML by itself.
 
-PLUGIN_ID  := io.github.baranskyi.omavoice
+PLUGIN_ID  := karamble.omavoice
 PLUGIN_DST := $(HOME)/.config/omarchy/plugins/$(PLUGIN_ID)
 VENV       := $(HOME)/.local/share/omavoice/venv
 PYTHON     := $(VENV)/bin/python

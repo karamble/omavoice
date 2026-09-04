@@ -14,7 +14,7 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "io.github.baranskyi.omavoice"
+  moduleName: "karamble.omavoice"
 
   readonly property string voiceState: client.connected ? client.voiceState : "offline"
   readonly property bool showLabel: {
@@ -112,7 +112,7 @@ BarWidget {
 
   function togglePanel() {
     if (bar && bar.shell && typeof bar.shell.toggle === "function")
-      bar.shell.toggle("io.github.baranskyi.omavoice", "{}")
+      bar.shell.toggle("karamble.omavoice", "{}")
   }
 
   // The same thing I does inside the panel, reachable without opening it.

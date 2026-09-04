@@ -69,7 +69,7 @@ Item {
   readonly property color hintGlow:
     hues.colorFor(client.voiceState, Color.menu.background, Color.accent)
 
-  readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "io.github.baranskyi.omavoice"
+  readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "karamble.omavoice"
 
   // The plugin's own directory, for the two helper scripts the tour runs. The
   // host does not inject it, so it is derived from this file's URL — which is
@@ -217,7 +217,7 @@ Item {
   readonly property bool daemonConnected: client.connected
 
   IpcHandler {
-    target: "io.github.baranskyi.omavoice"
+    target: "karamble.omavoice"
     function open(): void { root.open("{}") }
     function close(): void { root.dismiss() }
     function toggle(): void { root.toggle() }

@@ -4,6 +4,11 @@ A voice assistant for [Omarchy](https://omarchy.org). Hold `F10`, talk, let go.
 A window with a pixel waveform comes up, and it talks back. The thing Siri kept
 promising to be.
 
+> A fork of [baranskyi/omavoice](https://github.com/baranskyi/omavoice) that
+> replaces the OpenAI Realtime API with speech that runs on your own machine.
+> No API key, and nothing you say leaves the computer. See
+> [Where this differs from upstream](#where-this-differs-from-upstream).
+
 What makes it different from the voice mode in the ChatGPT app is that **all of
 it is local**. The hearing, the speaking and the thinking all happen on this
 machine: no API key, no account, and nothing you say leaves it. The agent
@@ -93,8 +98,8 @@ stops with a message if `python3` is missing or older than 3.11.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/baranskyi/omavoice --enable
-bash ~/.config/omarchy/plugins/io.github.baranskyi.omavoice/scripts/setup.sh
+omarchy plugin add https://github.com/karamble/omavoice --enable
+bash ~/.config/omarchy/plugins/karamble.omavoice/scripts/setup.sh
 ```
 
 `omarchy plugin add` only puts the QML in place. `setup.sh` does the rest, and
@@ -116,7 +121,7 @@ Then two things it deliberately does not do for you:
 2. **The hotkey.** Two bindings, because it is hold-to-talk — press and release
    are separate. In `~/.config/hypr/bindings.lua`:
    ```lua
-   local omavoice = "/home/you/.config/omarchy/plugins/io.github.baranskyi.omavoice/bin"
+   local omavoice = "/home/you/.config/omarchy/plugins/karamble.omavoice/bin"
    o.bind("F10", "Ask the assistant", omavoice .. "/omavoice-ptt down")
    o.bind("F10", "Ask the assistant (release)", omavoice .. "/omavoice-ptt up", { release = true })
    ```
@@ -262,8 +267,8 @@ was ever going to be transcribed at all.
 | Fold the transcript away | the eye beside the agent badge |
 | Interrupt an answer | `I` in the window, **right-click the crystal in the bar**, or `omavoice-ctl cancel` |
 | Start a new conversation | `N` in the window, or `omavoice-ctl reset` |
-| Settings | ⚙ in the window, or `omarchy-shell io.github.baranskyi.omavoice settings` |
-| How it works | `H` in the window, or `omarchy-shell io.github.baranskyi.omavoice help` |
+| Settings | ⚙ in the window, or `omarchy-shell karamble.omavoice settings` |
+| How it works | `H` in the window, or `omarchy-shell karamble.omavoice help` |
 | Show the setup checks | the tour's fourth card, or `bin/omavoice-check` |
 | Change the voice | ⚙ → the voice chip, or `omavoice-ctl voice af_heart` |
 | Hear a voice | ⚙ → **Hear it**, or `omavoice-ctl say "..."` |
@@ -370,8 +375,8 @@ star for `claude`, a lavender-blue gradient and the Codex `>_` for `codex`.
 ## Removal
 
 ```bash
-bash ~/.config/omarchy/plugins/io.github.baranskyi.omavoice/scripts/uninstall.sh
-omarchy plugin remove io.github.baranskyi.omavoice
+bash ~/.config/omarchy/plugins/karamble.omavoice/scripts/uninstall.sh
+omarchy plugin remove karamble.omavoice
 ```
 
 The script stops and removes the systemd unit, deletes the virtualenv at
@@ -653,6 +658,75 @@ What dominates a turn is none of the above: the agent does. Speech in and out
 costs roughly two and a half seconds together, and the agent takes as long as
 the question deserves.
 
+## Where this differs from upstream
+
+This is a fork of **[baranskyi/omavoice](https://github.com/baranskyi/omavoice)**
+by Slava Baranskyi, and the parts of it that are good are mostly his. The
+architecture — a voice that hears and speaks, a local coding agent that thinks,
+and a hard split between them — is the original design, and it is the reason
+this fork was possible at all. So is the panel: the pixel waveform, the
+waterfall, the crystal in the bar, the agent badges, the folder boundary and the
+per-agent consent screen. So is the daemon's shape: the noise gate that measures
+its own threshold, `AutoGain`, the echo-cancellation drop-in, the bounded reads
+and the process handling that makes a helper die with its parent.
+
+**What changed is the speech layer, and everything that followed from it.**
+
+Upstream, the voice is OpenAI's Realtime API. It does four jobs at once:
+transcription, the spoken voice, deciding when a turn has ended, and acting as
+the conversational model that hands questions to the local agent. It works well,
+and it costs about 1.6 cents a minute, needs a paid API key that a ChatGPT
+subscription does not provide, and sends the audio of your room to a server.
+
+This fork replaces it with software already on the machine:
+
+| | upstream | here |
+|---|---|---|
+| Hearing | OpenAI Realtime | [voxtype](https://voxtype.io) — whisper `base.en`, on the CPU |
+| Speaking | OpenAI Realtime | [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) 82M via ONNX Runtime, spawned per answer |
+| Turn detection | server-side VAD | a key you hold — `F10` |
+| Thinking | `codex` / `claude` | unchanged |
+| Cost | ~$0.016/min | none |
+| Audio leaves the machine | yes | no |
+
+Removing the Realtime API removed the session with it, because that connection
+*was* the conversation. Push-to-talk replaces it, and several things follow from
+that rather than from preference: there is no session to background or end, so
+`Q` is gone; the panel is a window you hold a key at rather than a modal that
+owns the microphone; and the daemon starts with no third-party imports at all,
+which is what lets the first-run wizard report what is missing before anything
+is installed.
+
+Other changes made along the way:
+
+- The panel is an **ordinary Wayland window**, not a layer-shell overlay. It
+  tiles, `SUPER+F` fullscreens it, and it no longer blacks out the desktop that
+  most questions are about. Settings, help, access and the tour are views inside
+  it rather than four more windows.
+- **`bin/omavoice-check`** and a setup card that says what is missing and offers
+  to install it — the Kokoro model, the virtualenv, the echo canceller, the
+  service, the keybinding.
+- **Microphone calibration** through PipeWire, because clipping in the ADC is
+  the one fault no software stage can repair and `AutoGain` only amplifies.
+- The agent is told **what the desktop is doing** — a summary from
+  [herdr](https://github.com/karamble/herdr) of the terminal workspaces and the
+  agent in each — so "what are my agents doing?" has a real answer.
+- Both backends **stream their working** to the panel, and a question is judged
+  wedged on silence rather than on a wall clock.
+
+**The plugin id is `karamble.omavoice`**, not upstream's
+`io.github.baranskyi.omavoice`. Two plugins cannot share an id, and keeping
+upstream's would have meant nobody could install both to compare them — which,
+given how far the speech layer has moved, is a comparison worth being able to
+make. If you are coming from the original, remove it first:
+`omarchy plugin remove io.github.baranskyi.omavoice`.
+
+If you want the original — the Realtime voice, its lower latency, its
+interruption handling, and a maintainer who is not one person with one laptop —
+install [baranskyi/omavoice](https://github.com/baranskyi/omavoice) instead.
+Bugs in the parts this fork did not touch are usually his to fix and worth
+reporting there.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE), unchanged from upstream.

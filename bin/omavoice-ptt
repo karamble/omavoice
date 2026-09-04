@@ -14,7 +14,7 @@
 # the key always ends with the window on screen, never without it.
 set -euo pipefail
 
-PLUGIN_ID="io.github.baranskyi.omavoice"
+PLUGIN_ID="karamble.omavoice"
 
 SELF="${BASH_SOURCE[0]}"
 while [[ -L "$SELF" ]]; do
