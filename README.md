@@ -69,6 +69,7 @@ shows on first run, with the command to fix each one.
 | **`voxtype`** | the ears | `sudo pacman -S voxtype-bin`, or from [voxtype.io](https://voxtype.io) |
 | **`codex` or `claude` on your `PATH`** | this is the brain | whichever you already use; both run on your existing subscription |
 | **PipeWire** with `pw-record` / `pw-play` / `pactl` | audio in and out | standard on Omarchy |
+| **WirePlumber** with `wpctl` | setting and remembering the microphone gain | standard on Omarchy |
 | **`setpriv`** (util-linux) | so a helper dies with the daemon | standard on Omarchy |
 | **Python 3.11+** | the daemon | the virtualenv is built from your own `python3`; `uv`, if present, only installs the pinned packages |
 | **339 MB of disk** | the Kokoro voice model | downloaded once by `setup.sh`, verified against a pinned `sha256` |
@@ -146,37 +147,58 @@ silence as its reference: it subtracts nothing, and the loop comes back. So
 `OMAVOICE_OUTPUT=omavoice_playback`, both at once. Measured
 suppression on this machine is around −41 dB (RMS 0.0438 → 0.0004).
 
-### Check the microphone gain before blaming anything else
+### Microphone gain, and the one fault software cannot fix
 
 If a silent room comes back as fluent nonsense — *"6 hours, 7 hours, one day."*,
-*"Thanks for watching!"* — the first thing to check is not the gate, the model
-or the canceller. It is the analog gain.
+*"Thanks for watching!"* — the cause is almost never the gate, the model or the
+canceller. It is the analog gain, and it is the one thing no later stage can
+repair.
 
 On the machine this was built on, ALSA `Capture` sat at 63/63 = **+30 dB** with
 `Internal Mic Boost` adding **+10 dB** on top. The signal clipped inside the ADC
 before PipeWire ever saw it, so room noise arrived at speech level and whisper
 did what whisper does with saturated noise. Measured through
-`echo-cancel-source`: median RMS **0.383**, peak 1.000, 1261 clipped samples in
-four seconds. With the boost off and `Capture` at a sane setting, the same still
-room measures median **0.00123**, peak 0.258, **zero** clipped samples — a
-factor of 312.
+`echo-cancel-source`: median RMS **0.383**, peak 1.000, 1261 samples on the rail
+in four seconds — a room-to-speech ratio of 2.5:1. Calibrated, the same room
+measures **0.00123** with **zero** clipped samples, and the ratio is 167:1.
+Thirty-six decibels of signal to noise, recovered by turning a knob down.
 
-```bash
-amixer -c 0 sget Capture                 # pinned at 100%?
-amixer -c 0 sget 'Internal Mic Boost'    # boost on top of it?
-amixer -c 0 sset 'Internal Mic Boost' 0
-amixer -c 0 sset Capture 50              # ~+20 dB here; aim for peaks well under 1.0
+**`AutoGain` cannot reach this**, and extending it would not help. It only
+amplifies (`MIN_GAIN = 1.0`), so on a clipped signal it settles at 1.0x and does
+nothing; and attenuating afterwards is a multiply, which preserves the ratio
+that clipping already destroyed. Clipping is lost information, not a level.
+
+So there is a button: **Settings ▸ Calibrate microphone**. Hold `F10` and say a
+sentence; it measures, moves the gain, and asks for one more if it has not
+landed. Two passes is typical.
+
+- It goes **through PipeWire**, not `amixer`. On a card with hardware capture
+  volume, PipeWire's volume *is* the ALSA control — so this reaches the analog
+  stage where the clipping happens, picks the right control for the active port,
+  and works on USB and Bluetooth where there is no `amixer` to run.
+- **WirePlumber makes it stick**, in `~/.local/state/wireplumber/default-routes`,
+  with no root — and it wins over `alsa-restore`, which restores the old values
+  at every boot.
+- It never touches `echo-cancel-source`, whose volume is a software multiply
+  *after* the ADC. Turning that down makes clipped samples quieter, not cleaner.
+- It moves **only when you press the button.** The gain is shared with every
+  other program on the machine, `F9` dictation included, which is exactly why
+  `AutoGain` refuses to touch it and why nothing here adjusts it on its own.
+
+If the microphone cannot be set this way — Bluetooth, most USB — it says so
+rather than moving something that will not help.
+
+The daemon logs a line for every question, and reports the last one on the setup
+card without ever opening the microphone itself:
+
+```
+held 4.86s: voiced 4.82s · rms median 0.1064 p95 0.4199 peak 0.7458 clipped 0 · gain 5.3x
 ```
 
-Confirm it with the line the daemon logs for every question:
-
-```
-held 4.86s: voiced 4.82s · rms median 0.1064 p95 0.4199 peak 0.7458 · gain 5.3x
-```
-
-`peak` at or near 1.000 is clipping. Speech wants headroom; `gain` makes up
-whatever is left. Note this is live ALSA state — a reboot or a profile switch
-puts it back, so make it stick if it was wrong.
+`clipped` above about 1% of samples is the fault; a handful on a plosive is
+normal and is deliberately ignored, because speech has a high crest factor and
+treating any clipping as a fault walks a good microphone down to a quarter of
+its useful level. After two genuinely clipped turns the panel says so once.
 
 Neither node becomes a system default — only omavoice goes through them,
 and the rest of the system never notices.
@@ -245,6 +267,7 @@ was ever going to be transcribed at all.
 | Show the setup checks | the tour's fourth card, or `bin/omavoice-check` |
 | Change the voice | ⚙ → the voice chip, or `omavoice-ctl voice af_heart` |
 | Hear a voice | ⚙ → **Hear it**, or `omavoice-ctl say "..."` |
+| Set the microphone gain | ⚙ → **Calibrate microphone**, or `omavoice-ctl calibrate` |
 | List the voices | `omavoice-ctl voice` |
 | Switch agent | `Tab` in the window, click the badge, or `omavoice-ctl backend claude` |
 | Ask in writing | `omavoice-ctl ask "..."` |
@@ -385,6 +408,10 @@ bin/omavoice-check                 # or --json, which is what the tour reads
 # the audio path, no agent
 ~/.local/share/omavoice/venv/bin/python -m omavoice.audio --loopback
 
+# what the microphone's hardware gain is, and what could set it
+PYTHONPATH=daemon python3 -c "import asyncio;from omavoice import mixer;\
+print(asyncio.run(mixer.read('echo-cancel-source')).describe())"
+
 # the brain, no microphone
 ~/.local/share/omavoice/venv/bin/python -m omavoice.brain "how much disk space?"
 
@@ -423,6 +450,12 @@ Traps that cost time:
   (`bin/python`, `lib64`). That is why the environment lives under
   `~/.local/share/omavoice/` and the daemon is reached through
   `PYTHONPATH`.
+- **A missing signal on a custom type is invisible to qmllint.** Assigning
+  `onSomethingRequested` to a component that never declared `somethingRequested`
+  lints clean and fails at load with "Cannot assign to non-existent property",
+  taking the whole plugin's IPC target with it. The shell journal is the only
+  place it shows up. Doubly so when the same handler name exists on two
+  components in one file and a search-and-replace lands on the wrong one.
 - **When it behaves strangely, the first question is what it thinks it heard.**
   `journalctl --user -u omavoice | grep -E "held |heard:"` answers it
   immediately: if `heard:` contains its own last sentence, echo is leaking; if
@@ -455,6 +488,7 @@ daemon/omavoice/
   speak.py      supervises the voice worker
   tts_worker.py Kokoro, spawned per utterance and gone again
   audio.py      pw-record / pw-play, RMS, the gate, AutoGain
+  mixer.py      the hardware capture gain, through PipeWire
   brain.py      claude -p / codex exec, parsing the answer
   herdr.py      what the desktop is doing, as context
   devices.py    which microphone and which sink, and why
