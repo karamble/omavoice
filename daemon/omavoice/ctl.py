@@ -18,25 +18,25 @@ async def _send(message: dict, *, collect: str | None = None, timeout: float = 9
     cfg = config.load()
     if not cfg.socket_path.exists():
         print(
-            "Демон не запущен. Запусти: systemctl --user start omavoice",
+            "The daemon is not running. Start it: systemctl --user start omavoice",
             file=sys.stderr,
         )
         return 1
     try:
         reply = await ipc.request(cfg.socket_path, message, collect=collect, timeout=timeout)
     except (ConnectionRefusedError, FileNotFoundError):
-        print("Демон не отвечает — сокет есть, но никто не слушает.", file=sys.stderr)
+        print("The daemon is not answering — the socket is there but nothing is listening.", file=sys.stderr)
         return 1
     except asyncio.TimeoutError:
-        print("Демон не ответил вовремя.", file=sys.stderr)
+        print("The daemon did not answer in time.", file=sys.stderr)
         return 1
 
     if reply is None:
-        print("Демон закрыл соединение без ответа.", file=sys.stderr)
+        print("The daemon closed the connection without answering.", file=sys.stderr)
         return 1
 
     if reply.get("ok") is False:
-        print(reply.get("error") or "Команда не выполнена.", file=sys.stderr)
+        print(reply.get("error") or "The command failed.", file=sys.stderr)
         return 1
     return _render(reply)
 
@@ -48,9 +48,9 @@ def _render(reply: dict) -> int:
             print()
             print(reply["markdown"])
         for link in reply.get("links") or []:
-            print(f"\n[ссылка] {link['label']} -> {link['url']}")
+            print(f"\n[link] {link['label']} -> {link['url']}")
         for entry in reply.get("files") or []:
-            print(f"[файл] {entry['label']} -> {entry['path']}")
+            print(f"[file] {entry['label']} -> {entry['path']}")
         return 0
 
     printable = {k: v for k, v in reply.items() if k not in ("id", "ok")}

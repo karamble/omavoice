@@ -998,15 +998,37 @@ class Brain:
         schema = _read_capped(ANSWER_SCHEMA, _MAX_SCHEMA_FILE, "the answer schema")
         if not schema:
             return Answer.error("The answer schema is missing.")
-        prompt = (
-            "Answer the user's question using your access to this machine and the web.\n"
-            "Reply with EXACTLY one JSON object matching this schema — no markdown "
-            "fence, no commentary. Write `spoken` and `markdown` in the same "
-            "language as the question:\n"
+
+        # The framing goes in the system prompt and the question goes in the
+        # user message, which is not only tidier. What arrives in `query` is
+        # whisper's output — untrusted, and on this machine frequently garbled:
+        # "Decred blockchain tip" came through as "Decred Lockchain Tip". Rules
+        # that have to hold do not belong in the same message as the text they
+        # are meant to govern. It also stops the whole schema being re-sent on
+        # every turn and replayed again by --resume.
+        #
+        # Appended rather than replacing: claude's own system prompt is what
+        # makes it able to answer at all, and this only adds the shape of the
+        # reply and the shape of the session.
+        system = (
+            "You are the brain of a voice assistant. Answer the user's question "
+            "using your access to this machine and the web.\n\n"
+            "Reply with EXACTLY one JSON object matching this schema — no "
+            "markdown fence, no commentary. Write `spoken` and `markdown` in "
+            "the same language as the question:\n"
             f"{schema}\n\n"
-            f"{_context_block(context)}"
-            f"Question: {query}"
+            "`spoken` is read out loud by a speech synthesiser: one to three "
+            "sentences, no markup, no lists, no code. Put the detail in "
+            "`markdown`, which is shown on screen.\n\n"
+            "This session ends the moment you answer. You cannot wait for "
+            "anything, follow anything up, or report back later, and nothing "
+            "you start will still be running to finish it. If you message "
+            "another session, you will never see its reply — so either get the "
+            "answer yourself before you answer, or say plainly that you cannot "
+            "and what the user would have to do instead. Never promise to "
+            "report back."
         )
+        prompt = f"{_context_block(context)}Question: {query}"
 
         # Two invocations, and only one of them claims a boundary.
         #
@@ -1029,7 +1051,8 @@ class Brain:
             argv = [
                 "claude", "-p",
                 "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit",
-                "--output-format", "json",
+                "--append-system-prompt", system,
+                "--output-format", "stream-json", "--verbose",
                 "--permission-mode", "plan",
             ]
         else:
@@ -1064,6 +1087,7 @@ class Brain:
                 "Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,WebBrowser",
                 "--strict-mcp-config",
                 "--setting-sources", "",
+                "--append-system-prompt", system,
                 "--output-format", "stream-json", "--verbose",
                 "--permission-mode", "dontAsk",
             ]
@@ -1112,7 +1136,7 @@ class Brain:
 
 
 async def _main() -> int:
-    """`python -m omavoice.brain "вопрос"` — the brain on its own, no audio."""
+    """`python -m omavoice.brain "question"` — the brain on its own, no audio."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Ask the local agent one question")

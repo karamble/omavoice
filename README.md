@@ -287,18 +287,13 @@ ten seconds facing a pulsing dot feel like a failure.
 The arrows are literal: `‹` inbound from the microphone, `→` out to the agent,
 `←` back from it, `›` out to the speakers.
 
-### Voice and grammatical gender
+### Voice
 
-Russian agrees its past tense with the speaker, so the voice is not only a
-timbre. A female voice saying *посмотрел* sounds like a glitch, and it is the
-first thing anyone notices. Every voice in the catalogue is marked ♀ or ♂, and
-the choice injects the matching rule into the prompt — **at the beginning** of
-the instructions, because in the tail of a long prompt the model drifts back to
-masculine.
-
-Changing the voice recreates the session: the Realtime API fixes the voice for
-the lifetime of a connection and refuses to change it after the first audio. The
-choice is remembered in `~/.local/state/omavoice/preferences.json`.
+Kokoro's English voices, American and British, listed with the gender each was
+trained on so the picker can be scanned. It runs on the CPU, spawned for each
+answer and gone again, so changing the voice needs no reconnection — the next
+thing said uses it. The choice is remembered in
+`~/.local/state/omavoice/preferences.json`.
 
 The agent badge wears vendor colours: terracotta `#D97757` and the Anthropic
 star for `claude`, a lavender-blue gradient and the Codex `>_` for `codex`.

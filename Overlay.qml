@@ -703,7 +703,7 @@ Item {
             model: client.links
             Button {
               required property var modelData
-              text: String(modelData.label || "Ссылка")
+              text: String(modelData.label || "Link")
               iconText: "↗"
               tooltipText: String(modelData.url || "")
               foreground: Color.menu.text
@@ -718,7 +718,7 @@ Item {
             model: client.files
             Button {
               required property var modelData
-              text: String(modelData.label || "Файл")
+              text: String(modelData.label || "File")
               iconText: "\udb80\ude14"  // file, as a surrogate pair
               tooltipText: String(modelData.path || "")
               foreground: Color.menu.text

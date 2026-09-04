@@ -895,7 +895,7 @@ async def _loopback(cfg: Config, seconds: float) -> int:
 
     mic = Microphone(cfg, on_chunk)
     await mic.start()
-    print(f"Говори {seconds:.0f} секунд — услышишь себя обратно.")
+    print(f"Speak for {seconds:.0f} seconds — you will hear yourself back.")
 
     loop = asyncio.get_running_loop()
     end = loop.time() + seconds
@@ -906,7 +906,7 @@ async def _loopback(cfg: Config, seconds: float) -> int:
         bars = int(peak * 40)
         spectrum = " ".join(f"{b:.2f}" for b in last_bands)
         print(
-            f"\rуровень |{'#' * bars}{'.' * (40 - bars)}| {peak:.3f}  полосы {spectrum}",
+            f"\rlevel |{'#' * bars}{'.' * (40 - bars)}| {peak:.3f}  bands {spectrum}",
             end="",
             flush=True,
         )

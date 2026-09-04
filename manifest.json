@@ -17,7 +17,7 @@
     "displayName": "Omavoice",
     "description": "Voice assistant with access to this machine",
     "category": "Productivity",
-    "aliases": ["voice", "assistant", "microphone", "speech", "голос"],
+    "aliases": ["voice", "assistant", "microphone", "speech", "talk"],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
