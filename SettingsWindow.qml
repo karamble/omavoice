@@ -14,7 +14,6 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
-import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
@@ -22,14 +21,12 @@ Item {
   id: root
 
   property bool open: false
-  property bool hasKey: false
   property var voices: []
   property string currentVoice: ""
   property string backend: "codex"
   property var audioSources: []
   property string audioInput: ""
   property string audioResolved: ""
-  property string keyError: ""
   property string workspace: ""
   property var consented: []
   property var unrestricted: []
@@ -38,54 +35,32 @@ Item {
   signal voicePicked(string name)
   signal backendPicked(string name)
   signal inputPicked(string name)
-  signal keySubmitted(string key)
+  signal voiceTested()
   signal accessRequested()
   signal tourRequested()
 
   onOpenChanged: {
-    if (open) {
-      keyField.text = ""
-      root.keyError = ""
-      Qt.callLater(function () {
-        if (!root.hasKey) keyField.forceActiveFocus()
-        else keyCatcher.forceActiveFocus()
-      })
-    }
+    if (open) Qt.callLater(function () { keyCatcher.forceActiveFocus() })
   }
 
-  PanelWindow {
+  // Not a window of its own. It was a layer-shell surface with its own scrim,
+  // then briefly a second toplevel — which meant asking a question opened a
+  // second window for the compositor to tile beside the first. It is a view
+  // inside the panel now: same place, same size, one window on the desktop.
+  Item {
     id: window
+    anchors.fill: parent
     visible: root.open
-    anchors { top: true; bottom: true; left: true; right: true }
-    color: "transparent"
 
-    WlrLayershell.namespace: "omavoice-settings"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-    exclusionMode: ExclusionMode.Ignore
-
-    Rectangle {
-      anchors.fill: parent
-      color: Color.menu.scrim.a > 0.05
-        ? Color.menu.scrim
-        : Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.62)
-      MouseArea { anchors.fill: parent; onClicked: root.closed() }
-    }
 
     BorderSurface {
       id: card
-      anchors.centerIn: parent
-      width: Style.space(460)
-      height: Math.min(
-        Style.space(560),
-        body.implicitHeight + card.contentTopInset + card.contentBottomInset
-      )
-      radius: Style.cornerRadius
-      color: Color.menu.background
-      borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
+      anchors.fill: parent
+      // No radius of its own: the compositor rounds and borders the window.
+      radius: 0
+      color: "transparent"
       padding: Style.spacing.panelPadding
 
-      MouseArea { anchors.fill: parent; onClicked: {} }
       Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
 
       Item {
@@ -140,119 +115,13 @@ Item {
 
             PanelSeparator { width: parent.width }
 
-            // --- connection -------------------------------------------------
-            PanelSectionHeader { width: parent.width; text: "OpenAI API key" }
-
-            Text {
-              width: parent.width
-              text: root.hasKey
-                ? "A key is configured. Paste a new one to replace it."
-                : "The Realtime API needs a paid API key — a ChatGPT subscription does not work for it. The key is stored in ~/.config/omavoice/env with mode 600."
-              textFormat: Text.PlainText
-              wrapMode: Text.Wrap
-              color: Color.menu.text
-              opacity: 0.55
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-
-            // Where the key actually comes from. Obvious once you have done it
-            // once, and a dead end if you have not — most people have never seen
-            // the API platform, which is a different site from the ChatGPT they
-            // already pay for.
-            Row {
-              spacing: Style.spaceReal(5)
-
-              Text {
-                id: keyLink
-                text: "platform.openai.com/api-keys"
-                textFormat: Text.PlainText
-                color: Color.accent
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-                font.underline: linkHover.hovered
-              }
-
-              Text {
-                anchors.verticalCenter: keyLink.verticalCenter
-                text: "↗"
-                textFormat: Text.PlainText
-                color: Color.accent
-                opacity: 0.7
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-              }
-
-              HoverHandler {
-                id: linkHover
-                cursorShape: Qt.PointingHandCursor
-              }
-              // execArgv, not a shell string: the URL is a constant here, but
-              // this is the habit that keeps the one that is not from biting.
-              TapHandler {
-                onTapped: Util.execArgv(["xdg-open", "https://platform.openai.com/api-keys"])
-              }
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.spaceReal(8)
-
-              TextField {
-                id: keyField
-                width: parent.width - saveButton.width - parent.spacing
-                // Masked: this is pasted on a screen that may be shared, and it
-                // is never displayed again once saved.
-                password: true
-                placeholderText: "sk-..."
-                foreground: Color.menu.text
-                accent: Color.accent
-                onAccepted: root.keySubmitted(keyField.text)
-              }
-
-              Button {
-                id: saveButton
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Save"
-                bordered: true
-                foreground: Color.menu.text
-                accent: Color.accent
-                fontFamily: Style.font.family
-                onClicked: root.keySubmitted(keyField.text)
-              }
-            }
-
-            Text {
-              width: parent.width
-              visible: root.keyError !== ""
-              text: root.keyError
-              textFormat: Text.PlainText
-              wrapMode: Text.Wrap
-              color: Color.urgent
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-
             PanelSeparator { width: parent.width }
 
             // --- voice --------------------------------------------------------
             PanelSectionHeader { width: parent.width; text: "Voice" }
 
-            Text {
-              width: parent.width
-              visible: !root.hasKey
-              text: "Add a key first — a voice needs a session to speak in."
-              textFormat: Text.PlainText
-              wrapMode: Text.Wrap
-              color: Color.menu.text
-              opacity: 0.45
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-
             Flow {
               width: parent.width
-              visible: root.hasKey
               spacing: Style.spaceReal(6)
 
               Repeater {
@@ -310,12 +179,35 @@ Item {
               }
             }
 
+            // Hearing it is the only way to choose one. A list of names is not
+            // a choice between voices, it is a choice between words.
+            Row {
+              width: parent.width
+              spacing: Style.spaceReal(8)
+
+              Button {
+                text: "\uf028  Hear it"
+                bordered: true
+                foreground: Color.menu.text
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: root.voiceTested()
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.currentVoice
+                textFormat: Text.PlainText
+                color: Color.menu.text
+                opacity: 0.45
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+            }
+
             Text {
               width: parent.width
-              visible: root.hasKey
-              // Worth stating: in Russian, Hebrew, Spanish and others the
-              // assistant's own verbs change with this choice.
-              text: "Changing the voice reconnects the session. In languages that mark gender, the assistant speaks about itself to match."
+              text: "Kokoro runs on this machine, spawned for each answer and gone again. A new voice is used by the next thing said — there is nothing to reconnect."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text

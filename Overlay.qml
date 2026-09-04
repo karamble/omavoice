@@ -1,21 +1,26 @@
 pragma ComponentBehavior: Bound
 
-// The floating voice panel.
+// The voice panel.
 //
-// A layer-shell surface on the overlay layer, dimming the desktop and holding a
-// card in the middle of the screen. The shape follows omarchy.emojis: the host
-// injects `shell` and `manifest`, calls open(payloadJson) on summon and close()
-// on hide, and reads `opened` back to keep its own bookkeeping straight.
+// An ordinary Wayland toplevel, not a layer-shell surface. It used to be the
+// latter: an overlay-layer surface covering the screen, dimming everything
+// behind it and taking the keyboard exclusively. That made it a modal the
+// compositor could not manage — it sat above the layout, ignored SUPER+F, could
+// not be tiled next to what you were asking about, and blacked out the very
+// thing most questions are about. As a normal window Hyprland tiles it, groups
+// it, fullscreens it and moves it between workspaces like anything else.
 //
-// The panel owns the microphone's lifetime. Opening it starts a session,
-// closing it ends one — a voice assistant that listens while you are not
-// looking at it is not a thing worth building.
+// The shape follows omarchy.emojis: the host injects `shell` and `manifest`,
+// calls open(payloadJson) on summon and close() on hide, and reads `opened`
+// back to keep its own bookkeeping straight.
+//
+// The panel does not own the microphone. F10 does — held, from anywhere,
+// whether this window is on screen or not.
 
 import QtQuick
 import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
@@ -41,6 +46,11 @@ Item {
   // home and moves on.
   readonly property bool tourNeeded: !client.onboarded && root.opened
   readonly property bool tourShowing: root.tourOpen || root.tourNeeded
+  // Whether one of the four other screens is covering the conversation. Read
+  // off the screens themselves rather than recomputed from the same flags they
+  // were bound to, so the two can never disagree.
+  readonly property bool viewShowing:
+    onboardingWindow.open || consentWindow.open || settingsWindow.open || helpWindow.open
   // Whether the waterfall is folded away. The answer is not: that is the thing
   // that was asked for, and hiding it along with the log was the eye doing more
   // than it says. What goes is the running commentary — heard, asked, took 8s —
@@ -50,7 +60,6 @@ Item {
   // that opened silently withholding its own history would be a worse default
   // than the one it replaced.
   property bool logHidden: false
-  property string keyError: ""
 
   // The hint line's travelling light borrows the figure's colour rather than
   // choosing its own. Two marks saying "listening" in two different greens
@@ -62,19 +71,32 @@ Item {
 
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "io.github.baranskyi.omavoice"
 
+  // The plugin's own directory, for the two helper scripts the tour runs. The
+  // host does not inject it, so it is derived from this file's URL — which is
+  // the one thing here that always knows where it was loaded from.
+  readonly property string pluginDir: {
+    const here = String(Qt.resolvedUrl("."))
+    return here.replace(/^file:\/\//, "").replace(/\/$/, "")
+  }
+
+  // One line, said in whichever voice is selected. Long enough to carry a tone
+  // and short enough that nobody sits through it twice — and it says what it
+  // is, so a sample heard from another room is not mistaken for an answer.
+  readonly property string voiceSample:
+    "This is the voice omavoice will answer you in. Everything you say is heard and answered on this machine."
+
   // The interface is English because the desktop is, and because the plugin is
   // meant to be installable by anyone. The conversation language is a separate
   // thing entirely: it follows whoever is speaking.
   readonly property string statusText: {
     if (client.errorText) return client.errorText
     if (!client.connected) return "Daemon not running"
-    if (!client.hasKey) return "No API key — open settings"
     switch (client.voiceState) {
-    case "listening": return client.userText ? "Listening…" : "Speak"
+    case "listening": return "Listening — keep holding"
     case "thinking": return "Looking it up"
     case "speaking": return "Answering"
     case "error": return "Error"
-    default: return "Ready"
+    default: return "Hold F10 to talk"
     }
   }
 
@@ -84,40 +106,29 @@ Item {
     client.wanted = true
     // Not cleared here: reopening after backgrounding should show the work
     // that was going on, and the daemon replays the last stretch of it. A
-    // genuinely new conversation is N, or a session that starts from nothing.
+    // genuinely new conversation is N.
     if (!client.connected || !client.backgrounded) client.clearConversation()
-    // The socket connects asynchronously; startSession is retried from
-    // onConnectedChanged if we beat it here.
-    // Fires only when the socket is already up; otherwise onConnectedChanged
-    // does it.
-    client.startSession()
+    // Opening starts nothing. There is no session to open, and the microphone
+    // belongs to the key — this window is somewhere to watch it happen.
     client.foreground()
     Qt.callLater(function () { keyCatcher.forceActiveFocus() })
   }
 
   // Host-initiated close. It already knows, so do not tell it back.
-  // The session survives: an agent that is mid-thought should finish, and the
-  // answer should still be spoken. The microphone stops, so nothing is
-  // listening to a room with no window on screen.
+  // Nothing is torn down: an agent that is mid-thought should finish and the
+  // answer should still be spoken. Nothing is listening either — the key is
+  // not down.
   function close() {
     root.opened = false
     client.background()
     client.wanted = false
   }
 
-  // User-initiated close (Escape, click on the scrim). Tell the host so its
-  // openPanelIds map stays in step and the next toggle opens rather than closes.
+  // User-initiated close (Escape). Tell the host so its openPanelIds map stays
+  // in step and the next toggle opens rather than closes.
   function dismiss() {
     root.opened = false
     client.background()
-    client.wanted = false
-    if (shell && typeof shell.hide === "function") shell.hide(root.pluginId)
-  }
-
-  // The deliberate ending: hang up, drop the session, release everything.
-  function endSession() {
-    root.opened = false
-    client.stopSession()
     client.wanted = false
     if (shell && typeof shell.hide === "function") shell.hide(root.pluginId)
   }
@@ -163,15 +174,11 @@ Item {
     // over, before the state has caught up.
     onBarged: wave.bargeIn()
     onTraced: function (text) { under.push(text) }
-    // Both commands are re-sent on connect, not just at open(): the socket
-    // connects asynchronously, so anything sent from open() lands before
-    // there is a socket to send it on and is silently dropped. That is what
-    // left the microphone off after returning from the background.
+    // Re-sent on connect, not just from open(): the socket connects
+    // asynchronously, so anything sent from open() lands before there is a
+    // socket to send it on and is silently dropped.
     onConnectedChanged: {
-      if (connected && root.opened) {
-        startSession()
-        foreground()
-      }
+      if (connected && root.opened) foreground()
     }
   }
 
@@ -193,143 +200,41 @@ Item {
     function backend(): string { return client.backend }
   }
 
-  ConsentWindow {
-    id: consentWindow
-    // Raised by itself the first time, and whenever what was agreed is no
-    // longer enough — a folder that has been deleted, a permission withdrawn.
-    // Not gated on `root.opened` the way the other two windows are: this one
-    // is the reason nothing is happening, and hiding it with the panel would
-    // leave the assistant silently refusing every question with the
-    // explanation one layer out of reach.
-    open: root.consentOpen || (client.accessNeeded && root.opened && !root.tourShowing)
-    workspace: client.workspace
-    consented: client.consented
-    unrestricted: client.unrestricted
-    folders: client.folderChoices
-    backend: client.backend
-    onClosed: root.consentOpen = false
-    onRefreshed: client.askAccess()
-    onFolderPicked: function (path) { client.setWorkspace(path) }
-    onConsentChanged: function (agent, granted) { client.setConsent(agent, granted) }
-    onUnrestrictChanged: function (agent, granted) { client.setUnrestricted(agent, granted) }
-  }
-
-  HelpWindow {
-    id: helpWindow
-    open: root.helpOpen && root.opened
-    backend: client.backend
-    workspace: client.workspace
-    onClosed: root.helpOpen = false
-    onTourRequested: {
-      root.helpOpen = false
-      root.tourOpen = true
-    }
-  }
-
-  OnboardingWindow {
-    id: onboardingWindow
-    open: root.tourShowing
-    backend: client.backend
-    workspace: client.workspace
-    // Every exit is the same exit. Whether it was read to the end or closed on
-    // the first card, it does not come back by itself — Settings brings it back
-    // when it is wanted.
-    onClosed: {
-      root.tourOpen = false
-      if (!client.onboarded) client.markOnboarded()
-    }
-  }
-
-  SettingsWindow {
-    id: settingsWindow
-    open: root.settingsOpen && root.opened
-    hasKey: client.hasKey
-    voices: client.voiceCatalogue
-    currentVoice: client.voice
-    backend: client.backend
-    audioSources: client.audioSources
-    audioInput: client.audioInput
-    audioResolved: client.audioResolved
-    keyError: root.keyError
-    workspace: client.workspace
-    consented: client.consented
-    unrestricted: client.unrestricted
-    onClosed: root.settingsOpen = false
-    onAccessRequested: {
-      root.settingsOpen = false
-      root.consentOpen = true
-    }
-    onTourRequested: {
-      root.settingsOpen = false
-      root.tourOpen = true
-    }
-    onVoicePicked: function (name) { client.setVoice(name) }
-    onBackendPicked: function (name) { client.setBackend(name) }
-    onInputPicked: function (name) { client.setInput(name) }
-    onKeySubmitted: function (key) {
-      root.keyError = ""
-      client.setApiKey(key)
-    }
-  }
-
-  PanelWindow {
+  FloatingWindow {
     id: panel
     visible: root.opened
-    anchors { top: true; bottom: true; left: true; right: true }
-    color: "transparent"
+    title: "Voice"
+    color: Color.menu.background
 
-    WlrLayershell.namespace: "omavoice"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-    exclusionMode: ExclusionMode.Ignore
-
-    // Themes may leave menu.scrim fully transparent — the emoji picker sits on
-    // a small card where that reads fine. This panel is the focus of a
-    // conversation, so it dims regardless of what the theme asked for.
-    Rectangle {
-      anchors.fill: parent
-      color: Color.menu.scrim.a > 0.05
-        ? Color.menu.scrim
-        : Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.55)
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      onClicked: root.dismiss()
-    }
+    // A preferred size, not a fixed one. Tiled, the compositor decides and
+    // these are ignored; floating, this is what it opens at. The height is
+    // what the content would like, capped — past the cap the middle scrolls.
+    implicitWidth: Style.space(560)
+    implicitHeight: Math.min(
+      Style.space(620),
+      card.contentTopInset + card.contentBottomInset
+        + head.implicitHeight
+        + (middle.implicitHeight > 0 ? Style.spacing.panelGap + middle.implicitHeight : 0)
+        + (actions.visible ? Style.spacing.panelGap + actions.implicitHeight : 0)
+        + Style.spacing.panelGap + footer.height
+    )
+    minimumSize: Qt.size(Style.space(320), Style.space(220))
 
     BorderSurface {
       id: card
-      // Top-centre: this is a heads-up display over whatever you are doing,
-      // and the middle of the screen is where you are looking at that.
-      anchors.horizontalCenter: parent.horizontalCenter
-      anchors.top: parent.top
-      anchors.topMargin: Style.space(64)
-      width: Style.space(560)
-      // Grows with its content up to a cap, past which the middle scrolls.
-      // The cap used to apply to the card alone while the content kept its
-      // full height underneath, so anything taller simply painted over the
-      // desktop below the card.
-      height: Math.min(
-        Style.space(620),
-        card.contentTopInset + card.contentBottomInset
-          + head.implicitHeight
-          + (middle.implicitHeight > 0 ? Style.spacing.panelGap + middle.implicitHeight : 0)
-          + (actions.visible ? Style.spacing.panelGap + actions.implicitHeight : 0)
-          + Style.spacing.panelGap + footer.height
-      )
-      radius: Style.cornerRadius
+      anchors.fill: parent
+      // No radius of its own: the compositor rounds and borders the window,
+      // and a second rounded rectangle inside the first is one too many.
+      radius: 0
       color: Color.menu.background
       borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
       padding: Style.spacing.panelPadding
 
-      // Swallow clicks so hitting the card does not dismiss the panel.
-      MouseArea { anchors.fill: parent; onClicked: {} }
-
-      Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-
       Item {
         id: keyCatcher
+        // Hidden, not unloaded, while one of the other screens is up: the
+        // waterfall and the answer are still what you come back to.
+        visible: !root.viewShowing
         anchors.fill: parent
         anchors.topMargin: card.contentTopInset
         anchors.rightMargin: card.contentRightInset
@@ -340,10 +245,19 @@ Item {
         focus: true
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function (event) {
+          // Space is the button, from the keyboard. isAutoRepeat is the whole
+          // of it: X11 and Wayland both deliver a held key as a stream of
+          // presses, and without the guard every repeat would re-open a
+          // microphone that is already open.
+          if (event.key === Qt.Key_Space) {
+            if (!event.isAutoRepeat) client.pttDown()
+            event.accepted = true
+            return
+          }
           if (event.key === Qt.Key_Escape) {
             // Step away without ending anything: the agent keeps working, the
             // answer still gets spoken, and the bar icon keeps the state.
-            // Interrupting a runaway answer is I; ending the session is Q.
+            // Interrupting a runaway answer is I.
             root.dismiss()
             event.accepted = true
           } else if (event.key === Qt.Key_I) {
@@ -352,19 +266,13 @@ Item {
             // keyboard exclusively would quietly swallow it.
             client.cancel()
             event.accepted = true
-          } else if (event.key === Qt.Key_Q) {
-            // Stops both directions and keeps the conversation. Escape steps
-            // away and lets the answer finish; this cuts it off. Neither forgets —
-            // that is N.
-            root.endSession()
-            event.accepted = true
           } else if (event.key === Qt.Key_H) {
             root.helpOpen = true
             event.accepted = true
           } else if (event.key === Qt.Key_N) {
-            // New conversation: forgets the Realtime history, the agent's
-            // thread and everything on screen. Bare N because the panel has
-            // no text entry to compete with.
+            // New conversation: forgets the agent's thread and everything on
+            // screen. Bare N because the panel has no text entry to compete
+            // with.
             client.reset()
             // Including the working behind the figure. Leaving the last
             // question's traces dissolving under a fresh conversation would be
@@ -373,6 +281,16 @@ Item {
             event.accepted = true
           } else if (event.key === Qt.Key_Tab) {
             client.setBackend(client.backend === "codex" ? "claude" : "codex")
+            event.accepted = true
+          }
+        }
+
+        // The release half of Space. Auto-repeat generates releases too, so the
+        // same guard applies here — without it a held key would ask the
+        // question over and over while it was still being spoken.
+        Keys.onReleased: function (event) {
+          if (event.key === Qt.Key_Space) {
+            if (!event.isAutoRepeat) client.pttUp()
             event.accepted = true
           }
         }
@@ -504,6 +422,98 @@ Item {
 
             }
           }
+
+          // --- push to talk ---------------------------------------------
+          // The gesture, made visible. F10 is how this is meant to be used —
+          // from anywhere, whether the window is on screen or not — and the
+          // key is named right here rather than in the help, because a panel
+          // that says "hold a key" without saying which one is an instruction
+          // rather than an interface.
+          //
+          // The button is the same gesture with a mouse, and it is deliberately
+          // press-and-hold rather than click-to-toggle. A toggle has two states
+          // to get wrong and one of them leaves a microphone open; holding
+          // something cannot be got wrong, because letting go is not a decision.
+          Rectangle {
+            id: talk
+            width: parent.width
+            height: Style.space(40)
+            radius: Style.space(6)
+            readonly property bool live: client.voiceState === "listening"
+            color: talk.live
+              ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.20)
+              : Qt.rgba(Color.menu.text.r, Color.menu.text.g, Color.menu.text.b,
+                        talkArea.containsMouse ? 0.10 : 0.055)
+            border.width: Math.max(1, Style.space(1))
+            border.color: talk.live
+              ? Color.accent
+              : Qt.rgba(Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.18)
+            opacity: client.connected ? 1 : 0.4
+            Behavior on color { ColorAnimation { duration: 120 } }
+
+            Row {
+              anchors.centerIn: parent
+              spacing: Style.spaceReal(9)
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "\uf130"
+                textFormat: Text.PlainText
+                color: talk.live ? Color.accent : Color.menu.text
+                opacity: talk.live ? 1 : 0.75
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: talk.live ? "Listening — let go to ask" : "Hold to talk"
+                textFormat: Text.PlainText
+                color: talk.live ? Color.accent : Color.menu.text
+                opacity: talk.live ? 1 : 0.85
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+              }
+
+              // The key, next to the thing it does. Dimmer than the label: it
+              // is the same gesture, not a second one.
+              Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: !talk.live
+                width: f10.implicitWidth + Style.spaceReal(10)
+                height: f10.implicitHeight + Style.spaceReal(4)
+                radius: Style.space(4)
+                color: "transparent"
+                border.width: Math.max(1, Style.space(1))
+                border.color: Qt.rgba(
+                  Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.28)
+
+                Text {
+                  id: f10
+                  anchors.centerIn: parent
+                  text: "F10"
+                  textFormat: Text.PlainText
+                  color: Color.menu.text
+                  opacity: 0.6
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+
+            // onCanceled as well as onReleased: dragging off the button, or the
+            // compositor taking the pointer away, must not leave the microphone
+            // open. Letting go is the one thing that cannot be allowed to fail.
+            MouseArea {
+              id: talkArea
+              anchors.fill: parent
+              hoverEnabled: true
+              enabled: client.connected
+              onPressed: client.pttDown()
+              onReleased: client.pttUp()
+              onCanceled: client.pttUp()
+            }
+          }
         }
 
         // --- footer --------------------------------------------------------
@@ -543,7 +553,7 @@ Item {
             height: hint.implicitHeight
 
             readonly property string line: client.connected
-              ? "Esc — background · I — interrupt · N — new · Q — stop · H — help"
+              ? "Hold F10 anywhere · Esc — background · I — interrupt · N — new · H — help"
               : "Start the daemon:  systemctl --user start omavoice"
 
             Text {
@@ -788,6 +798,102 @@ Item {
           }
         }
 
+      }
+
+      // The other four screens, in this window rather than beside it. Each is
+      // an Item that fills the card and paints over the conversation while it
+      // is up; anchored to the card rather than to the content area because
+      // each brings its own padding.
+      ConsentWindow {
+        id: consentWindow
+        anchors.fill: parent
+        // Raised by itself the first time, and whenever what was agreed is no
+        // longer enough — a folder that has been deleted, a permission withdrawn.
+        // Not gated on `root.opened` the way the other two windows are: this one
+        // is the reason nothing is happening, and hiding it with the panel would
+        // leave the assistant silently refusing every question with the
+        // explanation one layer out of reach.
+        open: root.consentOpen || (client.accessNeeded && root.opened && !root.tourShowing)
+        workspace: client.workspace
+        consented: client.consented
+        unrestricted: client.unrestricted
+        folders: client.folderChoices
+        backend: client.backend
+        onClosed: root.consentOpen = false
+        onRefreshed: client.askAccess()
+        onFolderPicked: function (path) { client.setWorkspace(path) }
+        onConsentChanged: function (agent, granted) { client.setConsent(agent, granted) }
+        onUnrestrictChanged: function (agent, granted) { client.setUnrestricted(agent, granted) }
+      }
+
+      HelpWindow {
+        id: helpWindow
+        anchors.fill: parent
+        open: root.helpOpen && root.opened
+        backend: client.backend
+        workspace: client.workspace
+        onClosed: root.helpOpen = false
+        onTourRequested: {
+          root.helpOpen = false
+          root.tourOpen = true
+        }
+      }
+
+      OnboardingWindow {
+        id: onboardingWindow
+        anchors.fill: parent
+        open: root.tourShowing
+        backend: client.backend
+        workspace: client.workspace
+        // The real grants, so the tour does not describe a machine nobody is on.
+        consented: client.consented
+        unrestricted: client.unrestricted
+        voices: client.voiceCatalogue
+        currentVoice: client.voice
+        // Where bin/omavoice-check and scripts/setup.sh live. The manifest's own
+        // path, not a guess: the plugin can be checked out anywhere.
+        pluginDir: root.pluginDir
+        // Whether "Hear it" can do anything. The daemon being up means the model
+        // and the packages were found — it is the only witness that does not
+        // require running the checks a second time from in here.
+        canSpeak: client.connected
+        onVoicePicked: function (name) { client.setVoice(name) }
+        onVoiceTested: client.say(root.voiceSample)
+        // Every exit is the same exit. Whether it was read to the end or closed on
+        // the first card, it does not come back by itself — Settings brings it back
+        // when it is wanted.
+        onClosed: {
+          root.tourOpen = false
+          if (!client.onboarded) client.markOnboarded()
+        }
+      }
+
+      SettingsWindow {
+        id: settingsWindow
+        anchors.fill: parent
+        open: root.settingsOpen && root.opened
+        voices: client.voiceCatalogue
+        currentVoice: client.voice
+        backend: client.backend
+        audioSources: client.audioSources
+        audioInput: client.audioInput
+        audioResolved: client.audioResolved
+        workspace: client.workspace
+        consented: client.consented
+        unrestricted: client.unrestricted
+        onClosed: root.settingsOpen = false
+        onAccessRequested: {
+          root.settingsOpen = false
+          root.consentOpen = true
+        }
+        onTourRequested: {
+          root.settingsOpen = false
+          root.tourOpen = true
+        }
+        onVoicePicked: function (name) { client.setVoice(name) }
+        onVoiceTested: client.say(root.voiceSample)
+        onBackendPicked: function (name) { client.setBackend(name) }
+        onInputPicked: function (name) { client.setInput(name) }
       }
     }
   }
