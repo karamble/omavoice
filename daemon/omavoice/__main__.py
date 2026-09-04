@@ -504,8 +504,17 @@ class Daemon:
         # switched on and off between words would be an edit rather than a
         # question.
         held.add(self.autogain.apply(chunk), passed)
-        self._pending_level = max(self._pending_level, level)
-        self._pending_bands = bands
+
+        # The figure shows what whisper is given, not what the microphone
+        # delivered. Those became different things once the gain was calibrated
+        # down: the level and the bands are measured on the raw chunk, before
+        # AutoGain, so a microphone set correctly for the ADC read as a figure
+        # that barely moved while the transcript was perfectly good. Scaling by
+        # the same gain the audio gets keeps the two honest about each other,
+        # and follows any microphone rather than a constant picked on one.
+        shown = self.autogain.gain
+        self._pending_level = max(self._pending_level, min(1.0, level * shown))
+        self._pending_bands = [min(1.0, b * shown) for b in bands]
 
         if self._dump is not None:
             self._dump.write(chunk)
