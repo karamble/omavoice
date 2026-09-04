@@ -41,6 +41,8 @@ from .audio import (
 from .brain import Brain
 from .config import Config
 from .realtime import RealtimeSession
+from .herdr import context as herdr_context
+from .listen import Held, transcribe, was_nothing, write_wav
 from .speak import speak as speak_locally
 
 log = logging.getLogger("omavoice")
@@ -183,6 +185,11 @@ class Daemon:
         # utterance it has been silent all along — the first sample is a second
         # or so away, in another process.
         self._local_speech = False
+        # The audio of the question being asked, while F10 is down. None the
+        # rest of the time, which is also how the mic pump knows to stay out of
+        # the way.
+        self._held: Held | None = None
+        self._turn_task: asyncio.Task | None = None
 
         # What the agent is doing, while it is doing it. Not kept and not
         # replayed to a late-joining panel: it is a window onto a process that
@@ -424,6 +431,16 @@ class Daemon:
             # the gate, this turns "somewhere between the microphone and the
             # API" into a question with a byte offset for an answer.
             self._mic_dump.write(chunk)
+        held = self._held
+        if held is not None:
+            # While the key is down the audio is the question, and it goes to
+            # whisper whole. The gate below substitutes silence rather than
+            # dropping it, which the server VAD needed and a file does not.
+            # The gate is asked but not applied: whisper gets the audio as it
+            # was, and the verdict only answers whether anyone spoke.
+            held.add(chunk, self.gate.step(level))
+            return
+
         session = self.session
         # Deliberately not checking `backgrounded`. Whether a window is on
         # screen says nothing about whether someone is talking, and dropping
@@ -606,6 +623,64 @@ class Daemon:
             self._local_speech = False
         self._set_state("listening" if self.session else "idle")
 
+    async def ptt(self, down: bool) -> dict:
+        """The key is the turn. Down opens the microphone, up asks the question."""
+        if down:
+            if self._held is not None:
+                return {"ok": True, "listening": True}
+            # Pressing while an answer is playing cuts it off, which is what
+            # barge-in was for when the server decided turns.
+            if self.state == "speaking":
+                self._drop_queued_audio()
+                await self.speaker.flush_now()
+            self._cancel_turn()
+            self._held = Held(self.cfg.sample_rate, self.cfg.channels)
+            await self.mic.start()
+            self._set_state("listening")
+            return {"ok": True, "listening": True}
+
+        held, self._held = self._held, None
+        if held is None:
+            return {"ok": True, "listening": False}
+        await self.mic.stop()
+        if not held.worth_hearing():
+            log.info("nothing worth transcribing (%.2fs, %.2fs of it voiced)",
+                     held.seconds, held.voiced_seconds)
+            self._set_state("idle")
+            return {"ok": True, "heard": ""}
+        # Answering takes as long as the question deserves, and the key that
+        # started it has already been released. Nothing waits on this.
+        self._turn_task = asyncio.create_task(self._turn(held), name="turn")
+        return {"ok": True, "heard": None}
+
+    def _cancel_turn(self) -> None:
+        task, self._turn_task = self._turn_task, None
+        if task and not task.done():
+            task.cancel()
+
+    async def _turn(self, held: Held) -> None:
+        """Transcribe what was said, ask the agent, speak the answer."""
+        self._set_state("thinking")
+        path = write_wav(held.pcm(), self.cfg.sample_rate, self.cfg.channels)
+        try:
+            heard = await transcribe(path)
+        finally:
+            # Speech, and it has served its purpose the moment it is text.
+            path.unlink(missing_ok=True)
+
+        if not heard or was_nothing(heard):
+            log.info("heard nothing in %.2fs of audio (%s)", held.seconds, heard or "silence")
+            self._set_state("idle")
+            return
+
+        log.info("heard: %s", heard)
+        self._emit("heard", heard)
+        self.server.broadcast(
+            {"type": "transcript", "role": "user", "text": heard, "final": True}
+        )
+        answer = await self.ask_brain(heard)
+        await self.say(answer.spoken)
+
     async def _ensure_playback(self) -> None:
         """Have a speaker and a pump, whether or not a session opened them.
 
@@ -661,7 +736,10 @@ class Daemon:
         self._emit("agent", query, backend=self.brain.backend)
         started = time.monotonic()
 
-        answer = await self.brain.ask(query)
+        # What the desktop is doing rides along with every question: it costs
+        # about 190 tokens and 8 ms, and guessing which questions are about the
+        # panes would be wrong more often than carrying it always.
+        answer = await self.brain.ask(query, await herdr_context())
 
         self._emit(
             "result",
@@ -1210,6 +1288,12 @@ class Daemon:
             # omavoice-ctl exercises the brain on its own.
             answer = await self.ask_brain(str(message.get("query") or ""))
             return {"ok": True, "spoken": answer.spoken, **answer.as_ui_payload()}
+
+        if command == "ptt":
+            # One command, two edges. Hyprland sends the press with `bind` and
+            # the release with `bindr`, and nothing else in the daemon carries
+            # that distinction.
+            return await self.ptt(bool(message.get("down")))
 
         if command == "say":
             # Debug handle: make the assistant speak a specific line, so the

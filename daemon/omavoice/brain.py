@@ -70,6 +70,20 @@ _MAX_ANSWER_FILE = 1024 * 1024
 _MAX_SCHEMA_FILE = 64 * 1024
 
 # And what survives into an Answer, which is what gets retained and broadcast.
+def _context_block(context: str) -> str:
+    """What the desktop is doing, when anything answered. Empty when not."""
+    said = str(context or "").strip()
+    if not said:
+        return ""
+    return (
+        "For reference, this is what the desktop is doing right now — the "
+        "terminal workspaces on this machine, and the coding agent in each "
+        "pane with its status and working directory. Use it only if the "
+        "question is about them:\n"
+        f"{said}\n\n"
+    )
+
+
 _MAX_SPOKEN = 4000
 _MAX_MARKDOWN = 64 * 1024
 _MAX_ENTRIES = 24
@@ -548,7 +562,7 @@ class Brain:
 
     # -- the one public call ------------------------------------------------
 
-    async def ask(self, query: str) -> Answer:
+    async def ask(self, query: str, context: str = "") -> Answer:
         query = (query or "").strip()
         if not query:
             return Answer.error("I did not catch the question.")
@@ -583,8 +597,8 @@ class Brain:
         async with self._lock:
             try:
                 if self.backend == "codex":
-                    return await self._ask_codex(query)
-                return await self._ask_claude(query)
+                    return await self._ask_codex(query, context)
+                return await self._ask_claude(query, context)
             except asyncio.TimeoutError:
                 # `_run` has already ended the group by the time this is
                 # reached; this is the sentence, not the cleanup.
@@ -727,7 +741,7 @@ class Brain:
                 self._job = None
         return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
-    async def _ask_codex(self, query: str) -> Answer:
+    async def _ask_codex(self, query: str, context: str = "") -> Answer:
         out_file = self.cfg.state_dir / "codex-last.json"
         out_file.unlink(missing_ok=True)
 
@@ -777,7 +791,9 @@ class Brain:
         thread = self._threads.get("codex")
         if thread:
             argv += ["resume", thread]
-        argv += [*after, query]
+        # codex has no slot for a system prompt on this path, so the desktop
+        # summary goes in front of the question itself.
+        argv += [*after, _context_block(context) + query]
 
         code, stdout, stderr = await self._run(argv, on_line=self._codex_trace)
 
@@ -864,7 +880,7 @@ class Brain:
             flags += ["-c", f"mcp_servers.{name}.enabled=false"]
         return flags
 
-    async def _ask_claude(self, query: str) -> Answer:
+    async def _ask_claude(self, query: str, context: str = "") -> Answer:
         # claude has no --output-schema, so the shape goes in the prompt and
         # _coerce cleans up whatever comes back.
         schema = _read_capped(ANSWER_SCHEMA, _MAX_SCHEMA_FILE, "the answer schema")
@@ -876,6 +892,7 @@ class Brain:
             "fence, no commentary. Write `spoken` and `markdown` in the same "
             "language as the question:\n"
             f"{schema}\n\n"
+            f"{_context_block(context)}"
             f"Question: {query}"
         )
 

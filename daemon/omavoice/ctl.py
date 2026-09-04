@@ -77,6 +77,9 @@ def main() -> int:
     backend = sub.add_parser("backend", help="switch the local agent")
     backend.add_argument("name", choices=("codex", "claude"))
 
+    ptt = sub.add_parser("ptt", help="hold-to-talk: `down` opens the microphone, `up` asks")
+    ptt.add_argument("edge", choices=("down", "up"))
+
     say = sub.add_parser("say", help="make the assistant speak a line (echo testing)")
     say.add_argument("text", nargs="+")
 
@@ -108,6 +111,10 @@ def main() -> int:
         return asyncio.run(_send({"cmd": "ask", "query": " ".join(args.query)}, timeout=180))
     if args.command == "backend":
         return asyncio.run(_send({"cmd": "backend", "value": args.name}))
+    if args.command == "ptt":
+        # Short timeout on purpose: the key release starts the answer and does
+        # not wait for it, so anything slow here is a daemon that is stuck.
+        return asyncio.run(_send({"cmd": "ptt", "down": args.edge == "down"}, timeout=10))
     if args.command == "say":
         return asyncio.run(_send({"cmd": "say", "text": " ".join(args.text)}))
     if args.command == "workspace":

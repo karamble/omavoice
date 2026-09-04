@@ -146,8 +146,14 @@ def trusted_binary(name: str) -> str:
         if not stat.S_ISREG(info.st_mode) or not os.access(candidate, os.X_OK):
             continue
         # And the link may not lead out of these directories, which would hand
-        # the choice back to whoever can write wherever it points.
-        if os.path.dirname(os.path.realpath(candidate)) not in _TRUSTED_BIN_DIRS:
+        # the choice back to whoever can write wherever it points. /usr/lib is
+        # allowed as a target because that is where a distribution puts the
+        # real program when /usr/bin holds a dispatcher: voxtype is a link to
+        # /usr/lib/voxtype/voxtype-avx512, chosen for the CPU. It is the same
+        # root-owned, package-managed tree the bin directories are, which is
+        # what the rule is actually about.
+        target = os.path.dirname(os.path.realpath(candidate))
+        if target not in _TRUSTED_BIN_DIRS and not target.startswith("/usr/lib/"):
             continue
         return candidate
     raise TrustedBinaryMissing(
