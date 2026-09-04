@@ -1,6 +1,6 @@
 """Microphone in, speaker out — both through PipeWire's own CLI.
 
-pw-record and pw-play in --raw mode speak exactly the format the Realtime API
+pw-record and pw-play in --raw mode speak exactly the format Kokoro and whisper
 wants (PCM16, 24 kHz, mono), and they resample for us, so there is no audio
 library here and nothing to build. Two long-lived subprocesses, one asyncio
 task each.

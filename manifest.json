@@ -5,7 +5,7 @@
   "version": "0.11.0",
   "author": "Slava Baranskyi",
   "license": "MIT",
-  "description": "Talk to a local agent out loud. OpenAI Realtime does the hearing and the speaking; codex or claude finds the answer on this machine and on the web.",
+  "description": "Talk to a local agent out loud. Hold F10: whisper hears you and Kokoro answers, both on this machine; codex or claude finds the answer here and on the web. No API key, and nothing spoken leaves the machine.",
   "repository": "https://github.com/baranskyi/omavoice",
   "kinds": ["overlay", "bar-widget"],
   "keepLoaded": true,

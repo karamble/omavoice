@@ -115,21 +115,20 @@ BarWidget {
       bar.shell.toggle("io.github.baranskyi.omavoice", "{}")
   }
 
-  // The same thing Q does inside the panel, reachable without opening it.
+  // The same thing I does inside the panel, reachable without opening it.
   //
   // Worth having on the icon precisely because the icon is where you look when
   // you want this: the glow says the microphone is open, and the thing you
   // want at that moment is for it to stop — not to open a window first, find
   // the key, and press it. The gesture is on the mark that told you.
   //
-  // Not `endSession` verbatim, though. That one also drops the panel's socket,
-  // which for the bar would put out the status light along with the
-  // microphone, and a widget that goes dark when you ask it to stop listening
-  // is indistinguishable from one that crashed.
+  // It is also the way out of a stuck key. Hyprland's `bindr` does not fire if
+  // focus moves while F10 is held, and the daemon's cancel closes the
+  // microphone as well as stopping the answer. The socket is deliberately left
+  // alone: a status light that goes dark when you ask it to stop listening is
+  // indistinguishable from one that crashed.
   function stopListening() {
-    client.stopSession()
-    if (bar && bar.shell && typeof bar.shell.hide === "function")
-      bar.shell.hide("io.github.baranskyi.omavoice")
+    client.cancel()
   }
 
   // Always connected: the icon is a status light, and a status light that only
@@ -150,8 +149,7 @@ BarWidget {
     tooltipText: {
       if (!client.connected) return "Voice — daemon not running"
       if (client.errorText) return client.errorText
-      if (!client.hasKey) return "Voice — no API key yet"
-      const what = "Voice · " + client.backend + " · " + client.voice
+      const what = "Hold F10 to talk · " + client.backend + " · " + client.voice
       // Said only while it is true. A gesture nobody knows about is not a
       // feature, but an instruction to stop something that is not running is
       // just noise in a tooltip that is read at a glance.

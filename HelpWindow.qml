@@ -14,7 +14,6 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
-import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
@@ -192,36 +191,24 @@ Item {
     }
   }
 
-  PanelWindow {
+  // Not a window of its own. It was a layer-shell surface with its own scrim,
+  // then briefly a second toplevel — which meant asking a question opened a
+  // second window for the compositor to tile beside the first. It is a view
+  // inside the panel now: same place, same size, one window on the desktop.
+  Item {
     id: window
+    anchors.fill: parent
     visible: root.open
-    anchors { top: true; bottom: true; left: true; right: true }
-    color: "transparent"
 
-    WlrLayershell.namespace: "omavoice-help"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-    exclusionMode: ExclusionMode.Ignore
-
-    Rectangle {
-      anchors.fill: parent
-      color: Color.menu.scrim.a > 0.05
-        ? Color.menu.scrim
-        : Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.62)
-      MouseArea { anchors.fill: parent; onClicked: root.closed() }
-    }
 
     BorderSurface {
       id: card
-      anchors.centerIn: parent
-      width: Style.space(520)
-      height: Math.min(Style.space(620), parent.height - Style.space(80))
-      radius: Style.cornerRadius
-      color: Color.menu.background
-      borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
+      anchors.fill: parent
+      // No radius of its own: the compositor rounds and borders the window.
+      radius: 0
+      color: "transparent"
       padding: Style.spacing.panelPadding
 
-      MouseArea { anchors.fill: parent; onClicked: {} }
 
       Item {
         id: keyCatcher
@@ -428,10 +415,10 @@ Item {
 
             Text {
               width: parent.width
-              text: "The voice is OpenAI's Realtime API. It hears and speaks, "
-                  + "and is forbidden from answering questions of fact — those "
-                  + "go to codex or claude, already installed here. Whatever "
-                  + "that agent can reach, this can use.\n\n"
+              text: "The hearing is whisper and the speaking is Kokoro, both "
+                  + "on this machine. Neither of them knows anything — every "
+                  + "question goes to codex or claude, already installed here. "
+                  + "Whatever that agent can reach, this can use.\n\n"
                   + "Which is why it asks first: an agent is started only after "
                   + "you name a folder and allow that agent by name, in "
                   + "Settings ▸ Access. Until you widen it there, the folder is "
@@ -459,8 +446,8 @@ Item {
               }
               Link { label: "voice" }
               Node {
-                title: "Realtime API"
-                detail: "hears and speaks · never answers"
+                title: "whisper · Kokoro"
+                detail: "hear and speak · never answer"
                 mark: Color.accent
               }
               Link { label: "ask_agent" }

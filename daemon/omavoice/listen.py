@@ -18,6 +18,7 @@ import re
 import wave
 from pathlib import Path
 
+from .audio import rms_full_scale
 from .devices import read_capped, terminate_and_reap, trusted_binary
 
 log = logging.getLogger("omavoice.listen")
@@ -33,7 +34,11 @@ MIN_SECONDS = 0.3
 # And below this much of it actually being speech. Whisper answers silence with
 # stock phrases — "Thank you.", "I don't know, I love you" — said with complete
 # confidence, and the agent then spends fifteen seconds answering them.
-MIN_VOICED_SECONDS = 0.25
+# How much of the held audio has to look like a voice before it is worth
+# transcribing at all. Raised from 0.25: whisper invents fluent sentences out
+# of near-silence — "6 hours, 7 hours, one day.", "What a morning, Tom." — and
+# a quarter second is a keystroke, not a question.
+MIN_VOICED_SECONDS = 0.35
 
 # base.en transcribes at about a fifth of real time here, so a minute of audio
 # is a dozen seconds of work. This ends a wedged run, not a slow one.
@@ -146,8 +151,32 @@ class Held:
         # The gate's verdict is counted but not applied: whisper should hear
         # the room as it was, and the count is only there to answer "did
         # anybody actually say anything".
+        #
+        # One verdict, and it already carries both halves: the gate asks
+        # whether this stands out from the room, and it is only allowed to open
+        # when AutoGain says the chunk would still look like speech once
+        # amplified. That second test is what makes the judgement a statement
+        # about speech rather than about this particular microphone.
         if voiced:
             self._voiced += len(chunk)
+
+    def levels(self) -> tuple[float, float, float]:
+        """median, p95 and peak chunk RMS of what was held, full scale.
+
+        Reported per turn because the two numbers that decide whether a
+        question is heard at all — the room's level and a voice's level — are
+        properties of a microphone and its gain, not constants. Guessing them
+        from anything other than this machine's own recordings is how a
+        working assistant came to answer nothing at all.
+        """
+        levels = sorted(
+            rms_full_scale(c) for c in self._chunks if len(c) >= 2
+        )
+        if not levels:
+            return (0.0, 0.0, 0.0)
+        return (levels[len(levels) // 2],
+                levels[min(len(levels) - 1, int(len(levels) * 0.95))],
+                levels[-1])
 
     def pcm(self) -> bytes:
         return b"".join(self._chunks)

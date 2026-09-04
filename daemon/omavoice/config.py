@@ -21,11 +21,11 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 ANSWER_SCHEMA = PACKAGE_DIR.parent / "schemas" / "answer.json"
 
 
-# Kokoro's English voices, and — the part that still matters — which
-# grammatical gender each speaks in, for languages that mark it on the verb.
-# The prefix is Kokoro's own: a for American, b for British, f for female,
-# m for male. The other languages it ships are left out; the assistant answers
-# in English because that is what its voices can pronounce.
+# Kokoro's English voices, with the gender each was trained on — used to label
+# and group the picker, nothing more. The prefix is Kokoro's own: a for
+# American, b for British, f for female, m for male. The other languages it
+# ships are left out; the assistant answers in English because that is what its
+# voices can pronounce.
 VOICES: tuple[tuple[str, str, str], ...] = (
     ("af_heart", "female", "Heart"),
     ("af_bella", "female", "Bella"),
@@ -57,12 +57,6 @@ VOICES: tuple[tuple[str, str, str], ...] = (
 )
 
 VOICE_GENDER = {name: gender for name, gender, _ in VOICES}
-
-
-def gender_of(voice: str) -> str:
-    """Grammatical gender to speak in. Unknown voices default to feminine,
-    matching the default voice rather than guessing."""
-    return VOICE_GENDER.get(voice, "female")
 
 
 def _runtime_dir() -> Path:
@@ -109,14 +103,14 @@ def _env_gate() -> float | None:
 @dataclass
 class Config:
     # --- audio -------------------------------------------------------------
-    # 24 kHz mono PCM16 is the only PCM rate the Realtime API accepts, and
-    # pw-record resamples to it for us, so this is not a knob worth turning.
+    # 24 kHz mono PCM16 is what Kokoro emits, and pw-record resamples capture
+    # to it for us, so both ends meet here with no conversion at all.
     sample_rate: int = 24000
     channels: int = 1
     # 20 ms of audio = 480 frames = 960 bytes. Small enough that barge-in feels
     # immediate, large enough that we are not doing syscalls all day.
     chunk_ms: int = 20
-    # Empty means "decide per session" — see devices.py, which follows whatever
+    # Empty means "decide when asked" — see devices.py, which follows whatever
     # the system is using and switches the echo canceller in or out with it.
     # Naming a device here pins it, and then both ends must be named: recording
     # from echo-cancel-source while playing to the default sink leaves the
@@ -125,33 +119,16 @@ class Config:
     input_target: str = field(default_factory=lambda: os.environ.get("OMAVOICE_INPUT", ""))
     output_target: str = field(default_factory=lambda: os.environ.get("OMAVOICE_OUTPUT", ""))
 
-    # --- realtime ----------------------------------------------------------
-    # Read from a file of its own rather than from the environment, and never
-    # put back. An environment variable is not a secret on a shared UID: it is
-    # inherited by every child, and /proc/<pid>/environ keeps the copy the
-    # process started with for anything running as the same user to read —
-    # including the agent this daemon spawns on every question. The key file
-    # is mode 600 and is opened only here.
-    api_key: str = field(default_factory=lambda: read_api_key())
-    model: str = field(default_factory=lambda: os.environ.get("OMAVOICE_MODEL", "gpt-realtime-2.1-mini"))
+    # --- speech ------------------------------------------------------------
+    # Which Kokoro voice speaks. The model runs on this machine, so this is the
+    # whole of the speech configuration: no key, no endpoint, no model name.
     voice: str = field(default_factory=lambda: os.environ.get("OMAVOICE_VOICE", "af_heart"))
-    transcription_model: str = field(
-        default_factory=lambda: os.environ.get("OMAVOICE_TRANSCRIBE", "gpt-4o-transcribe")
-    )
-    # How long a pause has to last before the turn is considered finished.
-    # 500 ms is what the API suggests and it is too eager for a person
-    # composing a question out loud: "what is the weather in Malaga... in
-    # Spain" was being cut after the fourth word and sent as a fragment.
+    # How long the noise gate holds open after the level drops. It was tuned
+    # against the server VAD's turn timeout, which is gone; what it does now is
+    # keep the gate's verdict steady across the pauses inside a sentence, so
+    # "was anyone actually speaking" is not decided by one quiet chunk.
     silence_ms: int = field(
         default_factory=lambda: int(os.environ.get("OMAVOICE_SILENCE_MS", "1100"))
-    )
-    # The API default. It used to be 0.82, on the theory that a laptop mic hears
-    # keyboards and fans and every false positive is the assistant answering
-    # nobody — but rejecting noise is the gate's job now, and it measures the
-    # room rather than guessing at it. Left strict, this reads a pause between
-    # words as the end of a sentence and commits half a question.
-    vad_threshold: float = field(
-        default_factory=lambda: float(os.environ.get("OMAVOICE_VAD", "0.5"))
     )
     # Microphone level below which audio is treated as room noise and replaced
     # with silence. "auto" — the default — measures the room's noise floor and
@@ -223,8 +200,8 @@ class Config:
 #
 # A pathname is a claim about the world at the moment it is resolved, and
 # nothing keeps it true afterwards. The daemon runs on every login and rewrites
-# the key file whenever someone saves one from the settings window; between
-# deciding "the key is at ~/.config/omavoice/key" and truncating that name,
+# its preferences whenever a setting changes; between deciding "preferences are
+# at ~/.local/state/omavoice/preferences.json" and truncating that name,
 # anything running as this user can have made it a symlink to something else.
 # So the directories are opened once, everything below works relative to those
 # descriptors, the last component is never followed, and what is found there
@@ -232,43 +209,10 @@ class Config:
 #
 # The reads are bounded and the writes are all-or-nothing, for the same reason:
 # a file that grew is not a file worth reading whole, and a half-written
-# credential is worse than no credential at all.
-
-# An OpenAI key is under two hundred characters; the longest project key seen
-# so far is 164. Four kilobytes is twenty times that and still one small read.
-KEY_MAX_BYTES = 4096
-# Settings only, a handful of KEY=VALUE lines. 64 KiB is far more than anything
-# setup.sh or a person editing by hand would ever put there.
-ENV_MAX_BYTES = 64 * 1024
-
+# preferences file is worse than none at all.
 
 class UnsafePath(OSError):
     """What is at that name is not the plain file of ours we expected."""
-
-
-def config_dir() -> Path:
-    """The daemon's own config directory, holding the key and the settings.
-
-    Not the shell's config and not a project .env — the key must not be
-    readable by every process the user starts, and it must survive reinstalling
-    the plugin.
-    """
-    base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-    return Path(base) / "omavoice"
-
-
-def env_file() -> Path:
-    """Settings, which systemd does load into the daemon's environment."""
-    return config_dir() / "env"
-
-
-def key_file() -> Path:
-    """Where the credential lives, alone.
-
-    Deliberately not the env file: systemd loads that one into the daemon's
-    environment, which is exactly what must not happen to a key.
-    """
-    return config_dir() / "key"
 
 
 _dir_fds: dict[str, int] = {}
@@ -286,7 +230,7 @@ def _dir_fd(path: Path) -> int:
         return cached
     path.mkdir(parents=True, exist_ok=True)
     # O_CLOEXEC because this daemon spawns codex and claude on every question,
-    # and a handle on the directory holding the key is not theirs to inherit.
+    # and a handle on the daemon's own state directory is not theirs to inherit.
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         if os.fstat(fd).st_uid != os.getuid():
@@ -296,10 +240,6 @@ def _dir_fd(path: Path) -> int:
         raise
     _dir_fds[str(path)] = fd
     return fd
-
-
-def config_dir_fd() -> int:
-    return _dir_fd(config_dir())
 
 
 def state_dir_fd() -> int:
@@ -437,72 +377,6 @@ def open_append(path: str | Path):
     finally:
         os.close(dir_fd)
     return os.fdopen(fd, "ab", buffering=0)
-
-
-def _config_fd() -> int | None:
-    try:
-        return config_dir_fd()
-    except OSError as exc:
-        log.warning("cannot use %s: %s", config_dir(), exc)
-        return None
-
-
-def read_api_key() -> str:
-    """The key, from its file, with the older locations still honoured.
-
-    Three of them, in order of how much they should be trusted:
-      1. the key file, which nothing else reads;
-      2. OPENAI_API_KEY in the environment, which is how it used to arrive and
-         how someone running the daemon by hand may still pass it;
-      3. the env file, where setup.sh used to put it — read directly here so an
-         existing installation keeps working without the key going through
-         systemd into the environment.
-    """
-    fd = _config_fd()
-    if fd is not None:
-        key = (read_private(fd, "key", KEY_MAX_BYTES) or "").strip()
-        if key:
-            return key
-
-    from_env = os.environ.get("OPENAI_API_KEY", "").strip()
-    if from_env:
-        return from_env
-
-    if fd is not None:
-        for line in (read_private(fd, "env", ENV_MAX_BYTES) or "").splitlines():
-            line = line.strip()
-            if line.startswith("OPENAI_API_KEY="):
-                return line.split("=", 1)[1].strip().strip("\'\"")
-
-    # Said out loud, and with the location, because the alternative is a daemon
-    # that starts and then fails at connect time with something about a 401.
-    log.warning("no API key yet — save one from the settings window, or put it in %s", key_file())
-    return ""
-
-
-def save_api_key(key: str) -> None:
-    """Write the key to its own file, and take it out of the env file.
-
-    Moving it is part of saving it: an installation that predates the split
-    still has the key in the env file, which systemd loads into the daemon's
-    environment. Leaving a copy there would mean the credential is protected
-    only until someone reads /proc.
-    """
-    fd = config_dir_fd()
-    write_private(fd, "key", key + "\n", mode=0o600)
-    _strip_key_from_env_file(fd)
-
-
-def _strip_key_from_env_file(dir_fd: int) -> None:
-    """Remove any OPENAI_API_KEY line from the settings file."""
-    text = read_private(dir_fd, "env", ENV_MAX_BYTES)
-    if text is None:
-        return
-    lines = text.splitlines()
-    kept = [line for line in lines if not line.strip().startswith("OPENAI_API_KEY=")]
-    if len(kept) == len(lines):
-        return
-    write_private(dir_fd, "env", "\n".join(kept).rstrip("\n") + "\n", mode=0o600)
 
 
 def load() -> Config:

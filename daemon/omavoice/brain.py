@@ -1,8 +1,8 @@
 """The brain: whatever actually answers the question.
 
-The Realtime model is the voice and the ears. It knows how to hold a
-conversation and nothing else — every question of fact goes through here, to a
-local coding agent that can read this machine as well as the web.
+whisper hears and Kokoro speaks; neither of them knows anything. Every
+question goes through here, to a local coding agent that can read this machine
+as well as the web.
 
 Two backends, same contract. Both are asked to return JSON matching
 schemas/answer.json, so the panel never has to parse prose:
@@ -13,8 +13,8 @@ schemas/answer.json, so the panel never has to parse prose:
     claude  `claude -p` with the schema pressed into the prompt. More
             integrations (skills, MCP), no schema enforcement, so we repair.
 
-Conversation continuity is per-backend: the first ask of a session starts a
-thread, later asks resume it, so "и что там во втором файле?" means something.
+Conversation continuity is per-backend: the first ask starts a thread and later
+asks resume it, so "and what about the second file?" means something.
 """
 
 from __future__ import annotations
@@ -84,7 +84,14 @@ def _context_block(context: str) -> str:
     )
 
 
-_MAX_SPOKEN = 4000
+# What is spoken aloud, verbatim, by a voice that runs at about 150 words a
+# minute. It was 4000 while the Realtime model paraphrased every answer into a
+# sentence or two before saying it; spoken literally, 4000 characters is four
+# or five minutes of speech that cannot be skipped, only interrupted.
+# answer.json already asks for one to three sentences — this is that number in
+# characters, so an agent that ignores the schema is cut off rather than
+# indulged. What it wrote is still on screen in full.
+_MAX_SPOKEN = 600
 _MAX_MARKDOWN = 64 * 1024
 _MAX_ENTRIES = 24
 _MAX_LABEL = 200

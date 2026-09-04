@@ -64,12 +64,10 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("status", help="what the daemon is doing right now")
-    sub.add_parser("start", help="open a voice session")
-    sub.add_parser("stop", help="close the voice session")
-    sub.add_parser("cancel", help="stop the answer in flight, keep the session")
+    sub.add_parser("cancel", help="cut off the answer being spoken")
     sub.add_parser("reset", help="forget this conversation and start a fresh one")
-    sub.add_parser("background", help="keep the session working with the panel closed")
-    sub.add_parser("foreground", help="resume listening")
+    sub.add_parser("background", help="the panel has gone away")
+    sub.add_parser("foreground", help="the panel is back")
 
     ask = sub.add_parser("ask", help="ask the local agent in text, no microphone")
     ask.add_argument("query", nargs="+")
@@ -83,7 +81,7 @@ def main() -> int:
     say = sub.add_parser("say", help="make the assistant speak a line (echo testing)")
     say.add_argument("text", nargs="+")
 
-    voice = sub.add_parser("voice", help="pick the voice (and with it, the grammatical gender)")
+    voice = sub.add_parser("voice", help="pick the Kokoro voice")
     voice.add_argument("name", nargs="?", help="omit to list what is available")
 
     sub.add_parser("access", help="the folder in use and which agents are allowed")
@@ -132,8 +130,7 @@ def main() -> int:
             from .config import VOICES
 
             for name, gender, label in VOICES:
-                mark = "женский" if gender == "female" else "мужской"
-                print(f"  {name:<9} {mark:<8} {label}")
+                print(f"  {name:<12} {gender:<7} {label}")
             return 0
         return asyncio.run(_send({"cmd": "voice", "value": args.name}))
     return asyncio.run(_send({"cmd": args.command}))

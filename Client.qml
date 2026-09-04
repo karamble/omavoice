@@ -2,10 +2,9 @@ pragma ComponentBehavior: Bound
 
 // The socket to omavoiced, and the state it pushes.
 //
-// Everything the panel and the bar icon draw comes from here. QML never talks
-// to OpenAI, never touches audio, never runs the agent — Quickshell has no
-// WebSocket module and the shell process is shared with the whole bar, so
-// anything slow or networked would freeze the desktop. This is a socket and a
+// Everything the panel and the bar icon draw comes from here. QML never
+// touches audio and never runs the agent: the shell process is shared with the
+// whole bar, so anything slow would freeze the desktop. This is a socket and a
 // few properties.
 //
 // Reconnection recreates the Socket rather than re-setting `connected`: a
@@ -30,12 +29,10 @@ Item {
   property var bands: [0, 0, 0, 0]       // per-band energy, so the figure reads timbre
   property string backend: "codex"
   property string voice: ""
-  property bool hasKey: false
   property bool backgrounded: false
   property var voiceCatalogue: []
-  property string userText: ""           // what the daemon heard us say
-  property string queryText: ""          // what the assistant asked the agent
-  property string assistantText: ""      // what it is saying back, streamed
+  property string userText: ""           // what whisper heard us say
+  property string assistantText: ""      // what it is saying back
   property string markdown: ""
   property var links: []
   property var files: []
@@ -141,8 +138,10 @@ Item {
     return true
   }
 
-  function startSession() { return send({ cmd: "start" }) }
-  function stopSession() { return send({ cmd: "stop" }) }
+  // Push to talk. The same two edges the F10 binding sends, so the button in
+  // the panel and the key are one gesture with two ways of making it.
+  function pttDown() { return send({ cmd: "ptt", down: true }) }
+  function pttUp() { return send({ cmd: "ptt", down: false }) }
   function background() { return send({ cmd: "background" }) }
   function foreground() { return send({ cmd: "foreground" }) }
   function cancel() { return send({ cmd: "cancel" }) }
@@ -155,7 +154,10 @@ Item {
   function setInput(name) { return send({ cmd: "input", value: String(name || "") }) }
   function setBackend(name) { return send({ cmd: "backend", value: String(name) }) }
   function setVoice(name) { return send({ cmd: "voice", value: String(name) }) }
-  function setApiKey(key) { return send({ cmd: "apikey", value: String(key) }) }
+  // Speak a line on demand. The daemon needs no session for it — it spawns a
+  // worker, says the line and the worker is gone again — so this is also the
+  // honest way to answer "what does this voice sound like".
+  function say(text) { return send({ cmd: "say", text: String(text || "") }) }
   function setWorkspace(path) { return send({ cmd: "workspace", value: String(path || "") }) }
   function setConsent(name, granted) {
     return send({ cmd: "consent", backend: String(name), granted: granted === true })
@@ -170,7 +172,6 @@ Item {
     eventModel.clear()
     pendingSince = 0
     userText = ""
-    queryText = ""
     assistantText = ""
     markdown = ""
     links = []
@@ -208,9 +209,6 @@ Item {
     case "background":
       root.backgrounded = message.background === true
       break
-    case "key":
-      root.hasKey = message.hasKey === true
-      break
     case "voices":
       if (Array.isArray(message.voices)) root.voiceCatalogue = message.voices
       break
@@ -234,7 +232,6 @@ Item {
         root.userText = String(message.text || "")
         if (message.final === true) {
           root.assistantText = ""
-          root.queryText = ""
           root.markdown = ""
           root.links = []
           root.files = []
@@ -251,11 +248,6 @@ Item {
       break
     case "reset":
       root.clearConversation()
-      break
-    case "query":
-      // What the assistant went looking for, in its words — shown as the
-      // panel's own note, never as the user's line.
-      root.queryText = String(message.text || "")
       break
     case "trace":
       root.traced(String(message.text || ""))
