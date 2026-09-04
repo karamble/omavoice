@@ -106,7 +106,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "ask":
-        return asyncio.run(_send({"cmd": "ask", "query": " ".join(args.query)}, timeout=180))
+        return asyncio.run(_send({"cmd": "ask", "query": " ".join(args.query)}, timeout=360))
     if args.command == "backend":
         return asyncio.run(_send({"cmd": "backend", "value": args.name}))
     if args.command == "ptt":

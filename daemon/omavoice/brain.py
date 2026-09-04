@@ -609,7 +609,16 @@ class Brain:
             except asyncio.TimeoutError:
                 # `_run` has already ended the group by the time this is
                 # reached; this is the sentence, not the cleanup.
-                return Answer.error("The agent is taking too long. Try a shorter question.")
+                #
+                # It says what happened rather than what to do about it. The
+                # old line — "try a shorter question" — blamed the question,
+                # which was almost never the reason and left no way to tell a
+                # slow answer from a wedged one.
+                minutes = self.cfg.brain_timeout / 60
+                return Answer.error(
+                    f"The agent worked for {minutes:.0f} minutes without "
+                    f"answering, so it was stopped."
+                )
             except Exception as exc:  # noqa: BLE001 - a dead brain must not kill the voice
                 log.exception("brain failed")
                 return Answer.error(f"The agent failed: {exc}")

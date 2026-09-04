@@ -139,7 +139,22 @@ class Config:
 
     # --- brain -------------------------------------------------------------
     backend: str = field(default_factory=lambda: os.environ.get("OMAVOICE_BACKEND", "codex"))
-    brain_timeout: float = 60.0
+    # How long the agent may work before it is stopped.
+    #
+    # Sixty seconds was the Realtime model's budget, not the agent's: the voice
+    # held the conversation and a tool call was expected back quickly enough
+    # that the model could speak over the gap. Nothing holds the floor now, and
+    # the agent is the same claude or codex answering the same questions it
+    # answers in a terminal — reading files, searching the web, running a
+    # command. Those take minutes, and a minute's ceiling turned every question
+    # worth asking into a refusal.
+    #
+    # Five minutes is a ceiling for a wedged process, not a budget for a
+    # thoughtful one. The waterfall shows the agent's own working while it runs,
+    # so a long answer is visibly a long answer rather than a hang.
+    brain_timeout: float = field(
+        default_factory=lambda: float(os.environ.get("OMAVOICE_BRAIN_TIMEOUT", "300"))
+    )
     # The folder this assistant works in — and, deliberately, the only one.
     #
     # It used to be the home directory, which was the wrong default in a way
