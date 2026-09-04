@@ -908,6 +908,8 @@ Item {
         audioSources: client.audioSources
         audioInput: client.audioInput
         audioResolved: client.audioResolved
+        calibratePhase: client.calibratePhase
+        calibrateMessage: client.calibrateMessage
         workspace: client.workspace
         consented: client.consented
         unrestricted: client.unrestricted
@@ -922,6 +924,7 @@ Item {
         }
         onVoicePicked: function (name) { client.setVoice(name) }
         onVoiceTested: client.say(root.voiceSample)
+        onCalibrateRequested: client.calibrate()
         onBackendPicked: function (name) { client.setBackend(name) }
         onInputPicked: function (name) { client.setInput(name) }
       }

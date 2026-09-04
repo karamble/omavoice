@@ -18,7 +18,7 @@ import re
 import wave
 from pathlib import Path
 
-from .audio import rms_full_scale
+from .audio import clipped_samples, rms_full_scale
 from .devices import read_capped, terminate_and_reap, trusted_binary
 
 log = logging.getLogger("omavoice.listen")
@@ -135,6 +135,10 @@ class Held:
         self._chunks: list[bytes] = []
         self._bytes = 0
         self._voiced = 0
+        # Counted as it arrives rather than derived afterwards: a clipped
+        # recording is the one fault no later stage can repair, and RMS cannot
+        # tell it apart from a merely loud one.
+        self._clipped = 0
         self._ceiling = int(MAX_SECONDS * rate * channels * 2)
 
     @property
@@ -148,6 +152,7 @@ class Held:
             return
         self._chunks.append(chunk)
         self._bytes += len(chunk)
+        self._clipped += clipped_samples(chunk)
         # The gate's verdict is counted but not applied: whisper should hear
         # the room as it was, and the count is only there to answer "did
         # anybody actually say anything".
@@ -177,6 +182,11 @@ class Held:
         return (levels[len(levels) // 2],
                 levels[min(len(levels) - 1, int(len(levels) * 0.95))],
                 levels[-1])
+
+    @property
+    def clipped(self) -> int:
+        """Samples that hit the rail. Anything above zero is a gain fault."""
+        return self._clipped
 
     def pcm(self) -> bytes:
         return b"".join(self._chunks)

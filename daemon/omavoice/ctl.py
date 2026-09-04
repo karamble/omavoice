@@ -65,6 +65,7 @@ def main() -> int:
 
     sub.add_parser("status", help="what the daemon is doing right now")
     sub.add_parser("cancel", help="cut off the answer being spoken")
+    sub.add_parser("calibrate", help="measure the microphone and set its gain")
     sub.add_parser("reset", help="forget this conversation and start a fresh one")
     sub.add_parser("background", help="the panel has gone away")
     sub.add_parser("foreground", help="the panel is back")

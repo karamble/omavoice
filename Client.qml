@@ -30,6 +30,11 @@ Item {
   property string backend: "codex"
   property string voice: ""
   property bool backgrounded: false
+  // Calibration, while one is running. `calibratePhase` is "" when idle,
+  // otherwise waiting / done / failed.
+  property string calibratePhase: ""
+  property string calibrateMessage: ""
+  readonly property bool calibrating: calibratePhase === "waiting"
   property var voiceCatalogue: []
   property string userText: ""           // what whisper heard us say
   property string assistantText: ""      // what it is saying back
@@ -158,6 +163,9 @@ Item {
   // worker, says the line and the worker is gone again — so this is also the
   // honest way to answer "what does this voice sound like".
   function say(text) { return send({ cmd: "say", text: String(text || "") }) }
+  // Measure the microphone and set its hardware gain. The daemon does not
+  // record anything itself — the next held turn is the sample.
+  function calibrate() { return send({ cmd: "calibrate" }) }
   function setWorkspace(path) { return send({ cmd: "workspace", value: String(path || "") }) }
   function setConsent(name, granted) {
     return send({ cmd: "consent", backend: String(name), granted: granted === true })
@@ -208,6 +216,10 @@ Item {
       break
     case "background":
       root.backgrounded = message.background === true
+      break
+    case "calibration":
+      root.calibratePhase = String(message.phase || "")
+      root.calibrateMessage = String(message.message || "")
       break
     case "voices":
       if (Array.isArray(message.voices)) root.voiceCatalogue = message.voices

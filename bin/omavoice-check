@@ -73,16 +73,51 @@ else
 fi
 
 missing_audio=()
-for tool in pw-record pw-play pactl setpriv; do
+for tool in pw-record pw-play pactl wpctl setpriv; do
   trusted "$tool" >/dev/null || missing_audio+=("$tool")
 done
 if [[ ${#missing_audio[@]} -eq 0 ]]; then
-  row audio hearing "Audio and process tools" true "pw-record, pw-play, pactl, setpriv" \
+  row audio hearing "Audio and process tools" true "pw-record, pw-play, pactl, wpctl, setpriv" \
     "" "" false
 else
   row audio hearing "Audio and process tools" false "missing: ${missing_audio[*]}" \
-    "PipeWire records and plays; setpriv is what makes a helper die with the daemon rather than outliving it." \
-    "sudo pacman -S pipewire-audio libpulse util-linux" false
+    "PipeWire records and plays, wpctl sets the capture gain, and setpriv is what makes a helper die with the daemon rather than outliving it." \
+    "sudo pacman -S pipewire-audio wireplumber libpulse util-linux" false
+fi
+
+# What the last real turn measured. Deliberately read from a file the daemon
+# wrote rather than recorded here: this script is re-run every two seconds while
+# the setup card is on screen, and a check that opened the microphone would
+# open it thirty times a minute.
+LEVEL_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/omavoice/last-level.json"
+if [[ -f "$LEVEL_FILE" ]]; then
+  level_peak=$(sed -n 's/.*"peak":[[:space:]]*\([0-9.]*\).*/\1/p' "$LEVEL_FILE")
+  # The daemon already decided, against the same threshold calibration uses.
+  # Deciding again here with a different rule is how a checklist comes to
+  # contradict the thing it is reporting on.
+  if grep -q '"bad":[[:space:]]*true' "$LEVEL_FILE"; then
+    row mic-level hearing "Microphone level" false "clipping — peak ${level_peak:-1.0}" \
+      "The signal is hitting the rail inside the sound card, before anything here sees it. No amount of software can undo that: a still room then transcribes as sentences nobody said. Settings, then Calibrate microphone." \
+      "" false
+  else
+    row mic-level hearing "Microphone level" true "peak ${level_peak:-?} on the last thing you said" \
+      "" "" false
+  fi
+else
+  row mic-level hearing "Microphone level" true "not measured yet — say something first" \
+    "" "" false
+fi
+
+# A landmine rather than a fault, and not one that can be fixed from here.
+# /var/lib/alsa/asound.state is root-owned and restored at every boot;
+# WirePlumber normally overrides it a moment later, so a stale clipping setting
+# in it is harmless right up until WirePlumber does not start.
+ASOUND_STATE=/var/lib/alsa/asound.state
+if [[ -r "$ASOUND_STATE" ]] \
+  && awk "/'Capture Volume'/,/^\t}/" "$ASOUND_STATE" 2>/dev/null | grep -q 'dbvalue.0 3000'; then
+  row alsa-state hearing "Saved ALSA capture level" false "saved at +30 dB, which clips" \
+    "This is what the system restores at boot before WirePlumber corrects it. Harmless while WirePlumber runs, and a clipping microphone again if it ever does not. It is root-owned, so it cannot be fixed from here." \
+    "sudo alsactl store" false
 fi
 
 # Two halves, and the second is the one that matters. The file being in place

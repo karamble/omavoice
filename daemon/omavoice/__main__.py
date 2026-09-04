@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import re
 import signal
@@ -27,7 +28,7 @@ import time
 import json
 from pathlib import Path
 
-from . import config, devices as device_choice, ipc
+from . import config, devices as device_choice, ipc, mixer
 from .audio import (
     AutoGain,
     Microphone,
@@ -39,7 +40,7 @@ from .audio import (
 from .brain import Brain
 from .config import Config
 from .herdr import context as herdr_context
-from .listen import Held, transcribe, was_nothing, write_wav
+from .listen import MIN_SECONDS, Held, transcribe, was_nothing, write_wav
 from .speak import speak as speak_locally
 
 log = logging.getLogger("omavoice")
@@ -77,6 +78,42 @@ _ECHO_TAIL_SECONDS = 0.9
 # eating the beginning of the question it exists to protect.
 _BARGE_QUIET_SECONDS = 0.4
 
+# Where a calibrated microphone should peak on ordinary speech. Loud enough to
+# sit well clear of the room and of AutoGain's speech floor, quiet enough that a
+# raised voice or a closer sentence still has somewhere to go. A microphone that
+# peaks at 1.0 is not loud, it is clipped, and there is no recovering the part
+# that was cut off.
+# Judged on the 95th percentile rather than the peak. A peak is one syllable —
+# it moves several decibels between two readings of the same voice, and it is
+# the first thing a clipped recording lies about, since the part above the rail
+# was cut off. p95 is what "speaking loudly" actually measures, and it barely
+# moved across the readings that produced wildly different peaks.
+_CALIBRATION_TARGET = 0.40
+_CALIBRATION_GOOD = (0.22, 0.60)
+# Three holds, and then it stops asking. The steps a device offers are coarse —
+# fractions of a decibel on the main control, ten at a time once it crosses into
+# a boost — so an exact landing is not always available and a loop that insisted
+# on one would ask forever.
+_CALIBRATION_MAX_PASSES = 4
+
+# Clipping is a fault whatever else is true, but how far to back off depends on
+# how much of it there is. Measured here: 0.14% of samples at the rail needed
+# about 3 dB, not the flat 6 dB an earlier version took twice — which walked a
+# microphone from clipping straight past the target to a quarter of it.
+# When clipping is bad enough to be the fault rather than a plosive.
+#
+# The number is high because a little clipping is normal and the level is the
+# better signal. Speech has a high crest factor: a chunk whose RMS is 0.26 can
+# still put individual samples on the rail, and three earlier versions of this
+# walked a perfectly good microphone down to a quarter of its useful level by
+# treating any clipping at all as a fault. The catastrophic case this feature
+# exists for was not subtle — 1.3% of samples, with the *room* at 0.383 RMS.
+_CALIBRATION_CLIP_HEAVY = 0.01
+
+# How many turns in a row have to come back clipped before the panel says so.
+# One is a shout into the microphone; two in a row is a setting.
+_CLIPPED_TURNS_BEFORE_WARNING = 2
+
 # The preferences file holds two short names, a folder, three lists of at most
 # two words each and a flag — a few hundred bytes, and the largest one this
 # program has ever written was under four hundred. 64 KiB leaves room for a
@@ -84,6 +121,9 @@ _BARGE_QUIET_SECONDS = 0.4
 # something we would rather not read whole.
 _MAX_PREFS_BYTES = 64 * 1024
 _PREFS_NAME = "preferences.json"
+# What the last held turn measured. Its only reader is bin/omavoice-check,
+# which must never open the microphone itself.
+_LEVEL_NAME = "last-level.json"
 
 
 def _open_dump(path: str):
@@ -171,6 +211,12 @@ class Daemon:
         # the way.
         self._held: Held | None = None
         self._turn_task: asyncio.Task | None = None
+        # Set while a calibration is running: the next held turn is measured
+        # rather than transcribed. None the rest of the time.
+        self._calibration: dict | None = None
+        # Consecutive turns that came back clipped, so the warning is earned
+        # rather than fired on the first shout.
+        self._clipped_turns = 0
 
         # What the agent is doing, while it is doing it. Not kept and not
         # replayed to a late-joining panel: it is a window onto a process that
@@ -591,8 +637,19 @@ class Daemon:
             return {"ok": True, "listening": False}
         await self.mic.stop()
         median, p95, peak = held.levels()
-        log.info("held %.2fs: voiced %.2fs · rms median %.4f p95 %.4f peak %.4f · gain %.1fx",
-                 held.seconds, held.voiced_seconds, median, p95, peak, self.autogain.gain)
+        log.info("held %.2fs: voiced %.2fs · rms median %.4f p95 %.4f peak %.4f "
+                 "clipped %d · gain %.1fx",
+                 held.seconds, held.voiced_seconds, median, p95, peak,
+                 held.clipped, self.autogain.gain)
+        self._remember_level(
+     peak, held.clipped / max(1, held.seconds * self.cfg.sample_rate))
+
+        # A calibration in progress eats this turn instead of asking it. The
+        # recording is the measurement; there is nothing to transcribe.
+        if self._calibration is not None:
+            await self._calibration_pass(held, p95, peak)
+            return {"ok": True, "calibrating": True}
+
         if not held.worth_hearing():
             log.info("nothing worth transcribing (%.2fs, %.2fs of it voiced)",
                      held.seconds, held.voiced_seconds)
@@ -602,6 +659,140 @@ class Daemon:
         # started it has already been released. Nothing waits on this.
         self._turn_task = asyncio.create_task(self._turn(held), name="turn")
         return {"ok": True, "heard": None}
+
+    # -- calibration ---------------------------------------------------------
+
+    def _remember_level(self, peak: float, clipped_fraction: float) -> None:
+        """Keep what the last real turn measured, and speak up if it is bad.
+
+        Written where `omavoice-check` can read it without opening the
+        microphone itself — a checklist that records would be a checklist that
+        turns the microphone on every two seconds while its card is on screen.
+        """
+        fd = self._state_fd()
+        if fd is not None:
+            # The fraction rather than the count, so every reader judges it
+            # against the same number calibration does rather than inventing
+            # its own idea of how much clipping is too much.
+            blob = json.dumps({"peak": round(peak, 4),
+                               "clipped": round(clipped_fraction, 5),
+                               "bad": clipped_fraction >= _CALIBRATION_CLIP_HEAVY,
+                               "at": time.time()})
+            with contextlib.suppress(OSError):
+                config.write_private(fd, _LEVEL_NAME, blob + "\n")
+
+        if clipped_fraction >= _CALIBRATION_CLIP_HEAVY:
+            self._clipped_turns += 1
+        else:
+            self._clipped_turns = 0
+            return
+        # Said once, on the turn that earns it, and then not again until the
+        # microphone has been clean. A warning on every turn is a warning
+        # nobody reads.
+        if self._clipped_turns == _CLIPPED_TURNS_BEFORE_WARNING:
+            message = ("the microphone is clipping — Settings, then Calibrate "
+                       "microphone")
+            log.warning("input is clipping (peak %.3f, %.2f%% of samples at the rail)",
+                        peak, clipped_fraction * 100)
+            self._emit("error", message)
+            self.server.broadcast({"type": "error", "message": message})
+
+    async def calibrate(self) -> dict:
+        """Begin measuring. The next held turn is the sample."""
+        await self._ensure_devices()
+        source = self.devices.input_target if self.devices else ""
+        gain = await mixer.read(source) if source else None
+        if gain is None:
+            return self._calibration_done(
+                "", "This microphone's level is not something this machine lets "
+                    "software set.")
+        if not gain.adjustable:
+            return self._calibration_done("", f"Not adjustable: {gain.reason}.")
+
+        self._calibration = {"pass": 0, "started": gain.db}
+        log.info("calibration started at %+.2f dB on %s", gain.db, gain.name)
+        self.server.broadcast({
+            "type": "calibration", "phase": "waiting", "passes": 0,
+            "db": round(gain.db, 2),
+            "message": "Hold F10 and say something, in your normal voice.",
+        })
+        return {"ok": True, "calibrating": True, "db": gain.db}
+
+    def _calibration_done(self, phase: str, message: str) -> dict:
+        self._calibration = None
+        self.server.broadcast({
+            "type": "calibration", "phase": phase or "failed", "message": message,
+        })
+        log.info("calibration: %s", message)
+        return {"ok": True, "calibrating": False, "message": message}
+
+    async def _calibration_pass(self, held: Held, p95: float, peak: float) -> None:
+        """One measured hold: judge it, move the gain, or stop."""
+        state = self._calibration
+        if state is None:
+            return
+        state["pass"] += 1
+        self._set_state("idle")
+
+        if held.seconds < MIN_SECONDS:
+            self.server.broadcast({
+                "type": "calibration", "phase": "waiting", "passes": state["pass"],
+                "message": "That was too short — hold the key and say a sentence.",
+            })
+            return
+
+        source = self.devices.input_target if self.devices else ""
+        gain = await mixer.read(source) if source else None
+        if gain is None or not gain.adjustable:
+            self._calibration_done("failed", "Lost track of the microphone's level.")
+            return
+
+        clipped_fraction = held.clipped / max(1, held.seconds * self.cfg.sample_rate)
+
+        low, high = _CALIBRATION_GOOD
+        if low <= p95 <= high and clipped_fraction < _CALIBRATION_CLIP_HEAVY:
+            self._calibration_done(
+                "done",
+                f"Good — speech sits at {p95:.2f} with room to spare, "
+                f"at {gain.db:+.1f} dB.")
+            return
+
+        if state["pass"] >= _CALIBRATION_MAX_PASSES:
+            self._calibration_done(
+                "done",
+                f"Left at {gain.db:+.1f} dB — as close as this device's steps go "
+                f"(speech sits at {p95:.2f}).")
+            return
+
+        # Work in decibels, because that is what the control is. Asking for the
+        # ratio between what was measured and what is wanted lands in one step
+        # when the device is fine-grained, and as near as it can otherwise.
+        if clipped_fraction >= _CALIBRATION_CLIP_HEAVY:
+            # Badly clipped, and the level it reports is a lie — the part above
+            # the rail was cut off — so back off by a fixed step rather than
+            # computing one from a number that understates itself.
+            change = -9.0
+        else:
+            # p95 scales with the gain until it clips, so one reading predicts
+            # the change. No ceiling and no memory between passes: an earlier
+            # version kept one and spent every remaining pass asking for the
+            # level it had just left.
+            change = 20.0 * math.log10(_CALIBRATION_TARGET / max(p95, 1e-4))
+        # Down freely, up cautiously: too loud is a fault that destroys the
+        # recording, too quiet is one AutoGain already covers in software.
+        change = max(-24.0, min(6.0, change))
+        reached = await mixer.set_db(gain, gain.db + change)
+        if reached is None:
+            self._calibration_done("failed", "Could not change the level.")
+            return
+
+        direction = "Lowered" if change < 0 else "Raised"
+        self.server.broadcast({
+            "type": "calibration", "phase": "waiting", "passes": state["pass"],
+            "db": round(reached, 2),
+            "message": f"{direction} to {reached:+.1f} dB. Hold F10 and say "
+                       f"something once more.",
+        })
 
     def _cancel_turn(self) -> None:
         task, self._turn_task = self._turn_task, None
@@ -845,6 +1036,12 @@ class Daemon:
             # the release with `bindr`, and nothing else in the daemon carries
             # that distinction.
             return await self.ptt(bool(message.get("down")))
+
+        if command == "calibrate":
+            # Registered as the turn so cancel and the next key press stop it,
+            # the same way `say` is.
+            self._cancel_turn()
+            return await self.calibrate()
 
         if command == "say":
             # Debug handle: make the assistant speak a specific line, so the

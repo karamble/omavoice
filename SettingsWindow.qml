@@ -27,6 +27,8 @@ Item {
   property var audioSources: []
   property string audioInput: ""
   property string audioResolved: ""
+  property string calibratePhase: ""
+  property string calibrateMessage: ""
   property string workspace: ""
   property var consented: []
   property var unrestricted: []
@@ -36,6 +38,7 @@ Item {
   signal backendPicked(string name)
   signal inputPicked(string name)
   signal voiceTested()
+  signal calibrateRequested()
   signal accessRequested()
   signal tourRequested()
 
@@ -290,6 +293,41 @@ Item {
                   TapHandler { onTapped: root.inputPicked(String(mic.modelData.name)) }
                 }
               }
+            }
+
+            // The gain the microphone records at, which is the one fault no
+            // amount of software can repair — a clipped recording has lost the
+            // part that was cut off. Deliberately a button rather than anything
+            // automatic: this is a control shared with every other program on
+            // the machine, and it moves only when somebody asks it to.
+            Row {
+              width: parent.width
+              spacing: Style.spaceReal(8)
+
+              Button {
+                text: root.calibratePhase === "waiting"
+                  ? "\uf130  Listening…"
+                  : "\uf130  Calibrate microphone"
+                bordered: true
+                foreground: Color.menu.text
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: root.calibrateRequested()
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.calibrateMessage !== ""
+              text: root.calibrateMessage
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              // The waiting message is an instruction and has to be read; the
+              // others are a result and can sit back.
+              color: root.calibratePhase === "failed" ? Color.urgent : Color.menu.text
+              opacity: root.calibratePhase === "waiting" ? 1 : 0.6
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
             }
 
             Text {
