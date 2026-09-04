@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import signal
+import time
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -444,6 +445,9 @@ class Brain:
         # not try to resume a codex thread inside claude.
         self._threads: dict[str, str] = {}
         self._job: _Job | None = None
+        # When the running agent last wrote anything. The idle timeout is
+        # measured from here rather than from when the question was asked.
+        self._last_output = 0.0
         # One agent at a time. The lock is what makes `_job` mean anything:
         # with two invocations in flight it named only the later one, and
         # cancelling stopped that one.
@@ -477,6 +481,10 @@ class Brain:
         """
         self._on_trace = on_trace
 
+    def _mark_alive(self) -> None:
+        """The agent said something, so it is not wedged."""
+        self._last_output = time.monotonic()
+
     def _trace(self, text: str) -> None:
         if self._on_trace is None:
             return
@@ -489,6 +497,56 @@ class Brain:
             self._on_trace(text)
         except Exception:  # noqa: BLE001
             log.debug("trace sink failed", exc_info=True)
+
+    def _claude_trace(self, line: str) -> None:
+        """One line of `claude --output-format stream-json`, worth seeing.
+
+        The same job as `_codex_trace` and the same restraint: the init banner,
+        the rate-limit events and the token accounting say nothing to a person
+        waiting. What does is the sentence the model just wrote and the name of
+        the tool it just reached for.
+
+        It has a second job the codex one does not need. This is the only
+        evidence that claude is still working — under `--output-format json` it
+        said nothing at all until it was finished — so every line that reaches
+        here also marks the agent alive for the idle timeout.
+        """
+        line = line.strip()
+        if not line.startswith("{"):
+            return
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            return
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return
+        for block in message.get("content") or ():
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                # The answer itself is JSON, because the schema is pressed into
+                # claude's prompt. Showing the envelope would put punctuation on
+                # screen where the sentence belongs — the same unwrapping the
+                # codex trace does for --output-schema.
+                text = str(block.get("text") or "")
+                stripped = text.lstrip()
+                if stripped.startswith("{"):
+                    try:
+                        inner = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        inner = None
+                    if isinstance(inner, dict):
+                        text = str(inner.get("spoken") or inner.get("markdown") or "")
+                text = " ".join(text.split())
+                if text:
+                    self._trace(text)
+            elif block.get("type") == "tool_use":
+                name = str(block.get("name") or "").strip()
+                if name:
+                    self._trace(f"{name}…")
 
     def _codex_trace(self, line: str) -> None:
         """One line of `codex exec --json`, turned into one line worth seeing.
@@ -606,7 +664,7 @@ class Brain:
                 if self.backend == "codex":
                     return await self._ask_codex(query, context)
                 return await self._ask_claude(query, context)
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError:  # noqa: PERF203
                 # `_run` has already ended the group by the time this is
                 # reached; this is the sentence, not the cleanup.
                 #
@@ -614,10 +672,10 @@ class Brain:
                 # old line — "try a shorter question" — blamed the question,
                 # which was almost never the reason and left no way to tell a
                 # slow answer from a wedged one.
-                minutes = self.cfg.brain_timeout / 60
+                quiet = self.cfg.brain_idle_timeout / 60
                 return Answer.error(
-                    f"The agent worked for {minutes:.0f} minutes without "
-                    f"answering, so it was stopped."
+                    f"The agent stopped responding — nothing for {quiet:.0f} "
+                    f"minutes — so it was stopped."
                 )
             except Exception as exc:  # noqa: BLE001 - a dead brain must not kill the voice
                 log.exception("brain failed")
@@ -647,6 +705,10 @@ class Brain:
         pending = bytearray() if on_line is not None else None
         while len(buf) < limit:
             block = await stream.read(min(_CHUNK, limit - len(buf)))
+            if block:
+                # Both pipes, and before any parsing: an agent writing anything
+                # at all is not the wedged process the idle timeout is for.
+                self._mark_alive()
             if not block:
                 if pending:
                     self._offer(on_line, bytes(pending))
@@ -741,9 +803,9 @@ class Brain:
         job = _Job(proc, _born(proc.pid))
         self._job = job
         try:
-            out, err = await asyncio.wait_for(
-                self._gather(job, stdin, on_line), timeout=self.cfg.brain_timeout
-            )
+            self._mark_alive()
+            gather = asyncio.ensure_future(self._gather(job, stdin, on_line))
+            out, err = await self._await_with_idle_timeout(gather)
         finally:
             # Every exit path, not only the unhappy ones: the answer came back,
             # the clock ran out, the question was cancelled, something raised.
@@ -756,6 +818,40 @@ class Brain:
             if self._job is job:
                 self._job = None
         return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+
+    async def _await_with_idle_timeout(self, gather: "asyncio.Future") -> tuple[bytes, bytes]:
+        """Wait for the agent, judging it on silence rather than on the clock.
+
+        A wall-clock ceiling cannot tell a thoughtful answer from a wedged
+        process, and picking one number for both is a choice between cutting
+        off real work and sitting through five minutes of nothing. Both
+        backends now narrate while they work — codex through `--json`, claude
+        through `--output-format stream-json` — so there is a better question to
+        ask: has it said anything lately.
+
+        A long answer that is still producing output never trips this. One that
+        has genuinely hung trips it in `brain_idle_timeout` rather than in
+        `brain_timeout`. The absolute ceiling stays as a backstop for the case
+        where a process talks steadily and forever.
+        """
+        deadline = time.monotonic() + self.cfg.brain_timeout
+        try:
+            while True:
+                quiet_for = time.monotonic() - self._last_output
+                idle_left = self.cfg.brain_idle_timeout - quiet_for
+                hard_left = deadline - time.monotonic()
+                if idle_left <= 0 or hard_left <= 0:
+                    raise asyncio.TimeoutError
+                done, _ = await asyncio.wait(
+                    {gather}, timeout=min(idle_left, hard_left, 5.0)
+                )
+                if done:
+                    return await gather
+        except BaseException:
+            gather.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await gather
+            raise
 
     async def _ask_codex(self, query: str, context: str = "") -> Answer:
         out_file = self.cfg.state_dir / "codex-last.json"
@@ -968,25 +1064,46 @@ class Brain:
                 "Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,WebBrowser",
                 "--strict-mcp-config",
                 "--setting-sources", "",
-                "--output-format", "json",
+                "--output-format", "stream-json", "--verbose",
                 "--permission-mode", "dontAsk",
             ]
         thread = self._threads.get("claude")
         if thread:
             argv += ["--resume", thread]
 
-        code, stdout, stderr = await self._run(argv + [prompt])
+        code, stdout, stderr = await self._run(argv + [prompt], on_line=self._claude_trace)
         if code != 0 and not stdout.strip():
             log.error("claude exited %s: %s", code, stderr[-400:])
             return Answer.error("Claude returned no answer.")
 
-        # `--output-format json` wraps the reply in an envelope carrying the
-        # session id we need for the next turn.
+        # `--output-format stream-json` is NDJSON: one event per line as it
+        # happens, ending in a `result` event that carries the answer and the
+        # session id needed to resume the thread next turn. Read from the end,
+        # because that is where the result is and everything before it is
+        # working rather than answer.
+        for line in reversed(stdout.splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("type") != "result":
+                continue
+            if event.get("session_id"):
+                self._threads["claude"] = _clip(str(event["session_id"]), _MAX_THREAD_ID)
+            result = str(event.get("result") or "")
+            if result:
+                return _coerce(result)
+            break
+
+        # No result event: the stream was cut off, or this is an older claude
+        # still answering with a single JSON envelope.
         try:
             envelope = json.loads(stdout)
         except json.JSONDecodeError:
             return _coerce(stdout)
-
         if isinstance(envelope, dict):
             if envelope.get("session_id"):
                 self._threads["claude"] = _clip(str(envelope["session_id"]), _MAX_THREAD_ID)

@@ -153,7 +153,18 @@ class Config:
     # thoughtful one. The waterfall shows the agent's own working while it runs,
     # so a long answer is visibly a long answer rather than a hang.
     brain_timeout: float = field(
-        default_factory=lambda: float(os.environ.get("OMAVOICE_BRAIN_TIMEOUT", "300"))
+        default_factory=lambda: float(os.environ.get("OMAVOICE_BRAIN_TIMEOUT", "900"))
+    )
+    # And the one that actually ends a stuck question. Both backends narrate
+    # while they work, so silence is a far better signal than elapsed time: an
+    # agent still writing is still working however long it takes, and one that
+    # has said nothing for this long is wedged rather than thoughtful.
+    #
+    # The pair is deliberate. This number decides when something broken is
+    # given up on; brain_timeout above is only a backstop for a process that
+    # chatters forever without finishing.
+    brain_idle_timeout: float = field(
+        default_factory=lambda: float(os.environ.get("OMAVOICE_BRAIN_IDLE", "120"))
     )
     # The folder this assistant works in — and, deliberately, the only one.
     #

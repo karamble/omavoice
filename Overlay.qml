@@ -88,9 +88,39 @@ Item {
   // The interface is English because the desktop is, and because the plugin is
   // meant to be installable by anyone. The conversation language is a separate
   // thing entirely: it follows whoever is speaking.
+  // Ticks only while the agent is out. The same reasoning as the bar widget:
+  // a number that is moving makes a two-minute wait obviously a wait, and the
+  // same two minutes against a still panel read as a hang. This is the whole
+  // of what replaced the Realtime model saying "one sec" out loud.
+  property real now: 0
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: client.pendingSince > 0
+    triggeredOnStart: true
+    onTriggered: root.now = Date.now()
+  }
+
+  readonly property int waitedSeconds: client.pendingSince > 0
+    ? Math.max(0, Math.round((root.now - client.pendingSince) / 1000))
+    : 0
+
+  readonly property string waitedText: {
+    const s = root.waitedSeconds
+    if (s < 60) return s + "s"
+    const m = Math.floor(s / 60)
+    return m + "m " + (s % 60) + "s"
+  }
+
   readonly property string statusText: {
     if (client.errorText) return client.errorText
     if (!client.connected) return "Daemon not running"
+    // An outstanding question outranks the voice state, and is checked rather
+    // than inferred from it: a question asked in text never flips the state to
+    // "thinking".
+    if (client.pendingSince > 0)
+      return "Working · " + root.waitedText
     switch (client.voiceState) {
     case "listening": return "Listening — keep holding"
     case "thinking": return "Looking it up"
