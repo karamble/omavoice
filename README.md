@@ -1,11 +1,13 @@
 # omavoice
 
-A voice assistant for [Omarchy](https://omarchy.org). Press `SUPER+CTRL+M`, a
-panel with a pixel waveform comes up in the middle of the screen, you talk, and
-it talks back. The thing Siri kept promising to be.
+A voice assistant for [Omarchy](https://omarchy.org). Hold `F10`, talk, let go.
+A window with a pixel waveform comes up, and it talks back. The thing Siri kept
+promising to be.
 
-What makes it different from the voice mode in the ChatGPT app is that **the
-agent is local**. It searches the web, but it also searches *this machine* —
+What makes it different from the voice mode in the ChatGPT app is that **all of
+it is local**. The hearing, the speaking and the thinking all happen on this
+machine: no API key, no account, and nothing you say leaves it. The agent
+searches the web when a question needs it, but it also searches *this machine* —
 files, projects, configs, running processes. You can ask "how many plugins do I
 have in omarchy" out loud, and the answer is a real one instead of an invented
 one.
@@ -16,66 +18,76 @@ one.
 
 Two parts, and the split between them is the whole design.
 
-**The voice** is the OpenAI Realtime API (`gpt-realtime-2.1-mini`). It hears, it
-speaks, it lets you interrupt it. That is all it does: its system prompt
-explicitly forbids it from answering questions of fact.
+**The ears** are [voxtype](https://voxtype.io), whisper `base.en` on the CPU.
+It transcribes what you said while the key was down — about a fifth of real
+time, so a five second question is text in one.
 
-**The brain** is `codex exec` running on a ChatGPT subscription (or `claude -p`,
-switchable at runtime). Every question with substance goes to it through an
-`ask_agent` function call. It reads the filesystem and the web and returns
-strict JSON: what to say out loud, what to put on screen, which buttons to
-offer.
+**The voice** is [Kokoro](https://github.com/thewh1teagle/kokoro-onnx), an 82M
+model through ONNX Runtime, also on the CPU. It is spawned for each answer and
+gone again: nothing is resident between questions. Neither of them knows
+anything — they hear and speak, and that is all.
 
-The split buys two things at once. The assistant becomes genuinely local, and
-the audio tokens — by far the expensive ones — are spent on speech instead of
-reasoning. A conversation costs about 1.6 cents a minute instead of twenty.
+**The brain** is `claude -p` or `codex exec` on the subscription you already
+have, switchable at runtime. Every question goes to it. It reads the filesystem
+and the web and returns strict JSON: what to say out loud, what to put on
+screen, which buttons to offer.
+
+The split is what makes the assistant genuinely local. There is no key to buy,
+no per-minute meter, and no audio on any wire.
 
 ```
-SUPER+CTRL+M ─► omarchy-shell shell toggle <plugin-id>
-                          │
-   ┌─ QML plugin (Quickshell) ──────────────────────┐
-   │  Overlay.qml   centred panel, waveform, MD     │
-   │  BarWidget.qml state icon in the bar           │
-   │  Client.qml    Unix socket, NDJSON             │
-   └────────────────────────────────────────────────┘
-                          │  $XDG_RUNTIME_DIR/omavoice.sock
-   ┌─ omavoiced (Python, systemd --user) ──────┐
-   │  pw-record ──► Realtime API ──► pw-play        │
-   │                    │                            │
-   │                    └─ ask_agent ─► codex/claude │
+hold F10 ─► omavoice-ptt down ─┬─► open the window
+                               └─► omavoice-ctl ptt down
+                                        │
+   ┌─ QML plugin (Quickshell) ───────────────────────┐
+   │  Overlay.qml   the window: waveform, PTT, MD    │
+   │  BarWidget.qml state icon in the bar            │
+   │  Client.qml    Unix socket, NDJSON              │
+   └─────────────────────────────────────────────────┘
+                               │  $XDG_RUNTIME_DIR/omavoice.sock
+   ┌─ omavoiced (Python, systemd --user) ────────────┐
+   │  pw-record ─► held while the key is down        │
+   │      └─► voxtype ─► claude -p / codex exec      │
+   │                          └─► Kokoro ─► pw-play  │
    └─────────────────────────────────────────────────┘
 ```
 
-There is no networking and no audio in the QML, and that is not a stylistic
-choice: the system has no QtWebSockets, and the plugin shares a process with
-the bar — anything slow or networked in there would hang the whole desktop.
+There is no audio in the QML, and that is not a stylistic choice: the plugin
+shares a process with the bar, so anything slow in there would hang the whole
+desktop. The panel is an ordinary Wayland window, so the compositor tiles it,
+`SUPER+F` fullscreens it and `SUPER+G` groups it like anything else.
 
 ## Requirements
 
-Everything here is external to the plugin and none of it is installed for you.
+Everything here is external to the plugin, and **`bin/omavoice-check` tells you
+which of it you are missing** — in a terminal, or on the setup card the panel
+shows on first run, with the command to fix each one.
 
 | | Why | Note |
 |---|---|---|
 | **Omarchy 4.0+** with `omarchy-shell` | the plugin is Quickshell QML | already there if you run Omarchy |
-| **A paid OpenAI API key** | the Realtime API bills per audio token | **a ChatGPT subscription does not work for this** — get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
-| **`codex` or `claude` on your `PATH`** | this is the brain | `codex` runs on a ChatGPT subscription, `claude` on your Claude limits |
-| **PipeWire** with `pw-record` / `pw-play` | audio in and out | standard on Omarchy |
-| **Python 3.11+** | the daemon | the virtualenv is built from your own `python3`; `uv`, if present, only installs the pinned package |
+| **`voxtype`** | the ears | `sudo pacman -S voxtype-bin`, or from [voxtype.io](https://voxtype.io) |
+| **`codex` or `claude` on your `PATH`** | this is the brain | whichever you already use; both run on your existing subscription |
+| **PipeWire** with `pw-record` / `pw-play` / `pactl` | audio in and out | standard on Omarchy |
+| **`setpriv`** (util-linux) | so a helper dies with the daemon | standard on Omarchy |
+| **Python 3.11+** | the daemon | the virtualenv is built from your own `python3`; `uv`, if present, only installs the pinned packages |
+| **339 MB of disk** | the Kokoro voice model | downloaded once by `setup.sh`, verified against a pinned `sha256` |
 
-The only package downloaded during setup is `websockets`, into a virtualenv
-under `~/.local/share/omavoice/`. Nothing is installed system wide and nothing
-asks for `sudo`. The virtualenv is built with the `python3` already on your
-machine and never with a downloaded interpreter: setup exports
-`UV_PYTHON_DOWNLOADS=never` and stops with a message if `python3` is missing or
-older than 3.11. No executable code enters the environment except through the
-lockfile.
+**No API key, and no account.** Nothing in this plugin authenticates to
+anything, and the daemon opens no outbound connection at all. The agent reaches
+the web only if you widen it — see Security and privacy.
 
-It is installed from `daemon/requirements.lock`, where the version is pinned
-and every artifact is bound to a digest, with `--require-hashes` — which
-refuses a mismatch rather than warning about it. `pip` is not upgraded. The
-daemon runs as a user service on every login, and resolving a version range at
-install time would let a future or compromised release into it without anyone
-having looked.
+The daemon itself imports nothing outside the standard library, so it starts and
+reports what is missing even before the virtualenv exists. What needs the
+virtualenv is the voice: `onnxruntime`, `kokoro-onnx` and `numpy`, installed
+under `~/.local/share/omavoice/` from `daemon/requirements.lock`, where every
+one of the 31 packages is pinned and bound to a digest, with `--require-hashes`
+— which refuses a mismatch rather than warning about it. `pip` is not upgraded.
+Nothing is installed system wide and nothing asks for `sudo`.
+
+The virtualenv is built with the `python3` already on your machine and never
+with a downloaded interpreter: setup exports `UV_PYTHON_DOWNLOADS=never` and
+stops with a message if `python3` is missing or older than 3.11.
 
 ## Install
 
@@ -84,31 +96,40 @@ omarchy plugin add https://github.com/baranskyi/omavoice --enable
 bash ~/.config/omarchy/plugins/io.github.baranskyi.omavoice/scripts/setup.sh
 ```
 
-`omarchy plugin add` only puts the QML in place. `setup.sh` does the rest: it
-creates the virtualenv, installs the systemd user unit, drops in the echo
-cancellation config, and creates an empty key file at
-`~/.config/omavoice/key` with mode `600`, in a file of its own. It never overwrites a config you
-already have — if one is there and differs, it says so and leaves it alone.
+`omarchy plugin add` only puts the QML in place. `setup.sh` does the rest, and
+takes steps if you want only one of them — `venv`, `models`, `unit`, `pipewire`,
+`ctl`, or `all`, which is the default:
 
-Then three steps it deliberately does not do for you:
+- builds the virtualenv and installs the pinned packages
+- downloads the Kokoro voice model and checks its `sha256`
+- installs the systemd user unit
+- drops in the echo cancellation config
+- links `omavoice-ctl` into `~/.local/bin`
 
-1. **The key.** Paste it in the interface — ⚙ at the bottom of the panel →
-   `OpenAI API key` → `Save` — or write it into `~/.config/omavoice/env`
-   by hand.
-2. **The daemon**
+Then two things it deliberately does not do for you:
+
+1. **Start the daemon**
    ```bash
    systemctl --user enable --now omavoice
    ```
-3. **The hotkey**, in `~/.config/hypr/bindings.lua`:
+2. **The hotkey.** Two bindings, because it is hold-to-talk — press and release
+   are separate. In `~/.config/hypr/bindings.lua`:
    ```lua
-   o.bind("SUPER + CTRL + M", "Voice assistant", "omarchy-shell shell toggle io.github.baranskyi.omavoice")
+   local omavoice = "/home/you/.config/omarchy/plugins/io.github.baranskyi.omavoice/bin"
+   o.bind("F10", "Ask the assistant", omavoice .. "/omavoice-ptt down")
+   o.bind("F10", "Ask the assistant (release)", omavoice .. "/omavoice-ptt up", { release = true })
    ```
+   Holding the key opens the window if it is not already up, and lets go when
+   you do. It never closes it — pressing while it is open just listens.
+
+`bin/omavoice-check` will tell you if any of that did not take.
 
 ### Echo cancellation — the important part
 
-Without it the assistant hears its own voice through the speakers, takes that
-for your speech, and answers itself: it says goodbye to its own goodbye, then to
-that goodbye, and so on until you stop it. The config ships with the plugin and
+It does two jobs, and the second is the one you notice. Without the canceller
+the assistant hears its own voice through the speakers when you talk over it.
+Without the noise suppression that comes with it, a still room transcribes as
+confident sentences nobody said. The config ships with the plugin and
 `setup.sh` installs it at
 
 ```
@@ -125,6 +146,38 @@ silence as its reference: it subtracts nothing, and the loop comes back. So
 `OMAVOICE_OUTPUT=omavoice_playback`, both at once. Measured
 suppression on this machine is around −41 dB (RMS 0.0438 → 0.0004).
 
+### Check the microphone gain before blaming anything else
+
+If a silent room comes back as fluent nonsense — *"6 hours, 7 hours, one day."*,
+*"Thanks for watching!"* — the first thing to check is not the gate, the model
+or the canceller. It is the analog gain.
+
+On the machine this was built on, ALSA `Capture` sat at 63/63 = **+30 dB** with
+`Internal Mic Boost` adding **+10 dB** on top. The signal clipped inside the ADC
+before PipeWire ever saw it, so room noise arrived at speech level and whisper
+did what whisper does with saturated noise. Measured through
+`echo-cancel-source`: median RMS **0.383**, peak 1.000, 1261 clipped samples in
+four seconds. With the boost off and `Capture` at a sane setting, the same still
+room measures median **0.00123**, peak 0.258, **zero** clipped samples — a
+factor of 312.
+
+```bash
+amixer -c 0 sget Capture                 # pinned at 100%?
+amixer -c 0 sget 'Internal Mic Boost'    # boost on top of it?
+amixer -c 0 sset 'Internal Mic Boost' 0
+amixer -c 0 sset Capture 50              # ~+20 dB here; aim for peaks well under 1.0
+```
+
+Confirm it with the line the daemon logs for every question:
+
+```
+held 4.86s: voiced 4.82s · rms median 0.1064 p95 0.4199 peak 0.7458 · gain 5.3x
+```
+
+`peak` at or near 1.000 is clipping. Speech wants headroom; `gain` makes up
+whatever is left. Note this is live ALSA state — a reboot or a profile switch
+puts it back, so make it stick if it was wrong.
+
 Neither node becomes a system default — only omavoice goes through them,
 and the rest of the system never notices.
 
@@ -132,9 +185,12 @@ Two more layers sit on top of the canceller, because one is not enough:
 
 - **A noise gate**, which measures its own threshold. A microphone hears the
   fan, the keyboard and the room; transcription turns that into confident
-  nonsense — `はい。`, `Gjiliv.` — and the assistant duly answers it. Everything
-  below the threshold is *replaced with silence* rather than dropped, because
-  the server side VAD needs a continuous stream.
+  nonsense — `はい。`, `Gjiliv.` — and the assistant duly answers it. Its verdict
+  is counted rather than applied: whisper is handed the recording as it was, and
+  the count only answers "did anybody actually speak" before a question is
+  transcribed at all. A chunk counts as a voice when it stands out from the room
+  **and** would still look like speech once `AutoGain` has amplified it, which
+  is a question about speech rather than about one microphone.
 
   The threshold is not a constant, because a constant is only ever right for
   the microphone it was picked on. A laptop mic at talking distance and a
@@ -163,109 +219,93 @@ to spare and residual echo does not. If something still gets through, pin
 `OMAVOICE_GATE` to a number above what leaks; headphones remove the question
 entirely.
 
-When a conversation misbehaves, run the daemon with `OMAVOICE_DEBUG=1` and read
-one line per second:
+When it misbehaves, run the daemon with `OMAVOICE_DEBUG=1` and read one line
+per second while the key is held:
 
 ```
-mic: peak=0.3241 gate=0.0032 floor=0.0002 passed=50/50 sent=248
+mic: peak=0.3241 rms=0.1064 clip=0 gate=0.0032 floor=0.0002 voiced=1.04s of 2.40s
 ```
 
-`peak` against `gate` settles "why did it not hear me" in one glance, and `sent`
-settles the harder question of whether the audio ever reached the server at
-all.
+`peak` against `gate` settles "why did it not hear me" in one glance, `clip`
+settles whether the gain is too high, and `voiced` settles whether the question
+was ever going to be transcribed at all.
 
 ## Using it
 
 | Action | How |
 |---|---|
-| Open the panel | `SUPER+CTRL+M`, or click the crystal in the bar |
-| Send it to the background | `Esc`, a click outside the panel, or the same hotkey |
+| **Ask something** | **hold `F10`, anywhere** — or hold the button in the window, or hold `Space` while it has focus |
+| Open the window | holding `F10` opens it; or click the crystal in the bar |
+| Send it away | `Esc`, or the same bar icon |
 | Fold the transcript away | the eye beside the agent badge |
-| Stop, keeping the conversation | `Q` in the panel, **right-click the crystal in the bar**, or `omavoice-ctl stop` |
-| Interrupt an answer | `I` in the panel, or `omavoice-ctl cancel` |
-| Start a new conversation | `N` in the panel, or `omavoice-ctl reset` |
-| Settings | ⚙ in the panel, or `omarchy-shell io.github.baranskyi.omavoice settings` |
-| How it works | `H` in the panel, or `omarchy-shell io.github.baranskyi.omavoice help` |
-| Change the voice | ⚙ → the voice chip, or `omavoice-ctl voice cedar` |
+| Interrupt an answer | `I` in the window, **right-click the crystal in the bar**, or `omavoice-ctl cancel` |
+| Start a new conversation | `N` in the window, or `omavoice-ctl reset` |
+| Settings | ⚙ in the window, or `omarchy-shell io.github.baranskyi.omavoice settings` |
+| How it works | `H` in the window, or `omarchy-shell io.github.baranskyi.omavoice help` |
+| Show the setup checks | the tour's fourth card, or `bin/omavoice-check` |
+| Change the voice | ⚙ → the voice chip, or `omavoice-ctl voice af_heart` |
+| Hear a voice | ⚙ → **Hear it**, or `omavoice-ctl say "..."` |
 | List the voices | `omavoice-ctl voice` |
-| Switch agent | `Tab` in the panel, click the badge, or `omavoice-ctl backend claude` |
+| Switch agent | `Tab` in the window, click the badge, or `omavoice-ctl backend claude` |
 | Ask in writing | `omavoice-ctl ask "..."` |
-| Make it say a phrase | `omavoice-ctl say "..."` — for testing echo with nobody in the room |
 | Inspect the state | `omavoice-ctl status` · `make logs` |
+
+Right-clicking the crystal is also the way out of a stuck key: Hyprland's
+`bindr` does not fire if focus moves while `F10` is held, and cancel closes the
+microphone as well as stopping the answer.
 
 ### The bar says when it can hear you
 
 The crystal and the word beside it glow while the microphone is open, and only
-then. Passive, they sit quietly in the theme's own foreground; live, they turn
-the same green the panel uses and breathe.
+then — which now means: while you are holding the key. Passive, they sit quietly
+in the theme's own foreground; live, they turn the same green the window uses
+and breathe.
 
-This matters more than it looks. Backgrounding stops nothing, so a hidden panel
-still means an open microphone, and the bar is then the only thing left that
-can say so. A steady light in a bar full of steady icons stops being noticed
-within a day — which is why this one moves.
+It is wired to the microphone rather than to the window, so it is honest even
+when the window is not on screen. A steady light in a bar full of steady icons
+stops being noticed within a day, which is why this one moves.
 
-It is wired to the microphone rather than to the panel: listening, working and
-speaking all glow, because the microphone is open in all three. After `Q` it
-goes out, because that is the one thing that closes it.
+### Hold the key
 
-### Background and ending
+There is no session and no conversation to be in or out of. The key is the
+turn: press it and the microphone opens, let go and what you said goes to
+whisper and then to the agent. Between turns nothing is listening, and nothing
+is resident — no connection, no model in memory.
 
-Closing the panel and ending the conversation are different things, and they
-live on different keys.
+That is the whole model, and most of the old controls went with it:
 
-- **`Esc` (and a click outside) sends it to the background.** Nothing stops: the
-  session stays alive, the microphone stays open, the agent finishes what it
-  started, and the answer is still spoken out loud. This is for when the question turns out to be a long one and there is no
-  reason to sit in front of the panel while it is computed. The crystal in the
-  bar keeps showing state — it pulses while the agent works.
-- **`Q` stops it.** The microphone is released and whatever the assistant was
-  saying is cut off — but the connection stays up and so does the conversation.
-  Open the panel again and it picks up where it left off, remembering what was
-  said. Stopping is not forgetting; forgetting is `N`.
+- **`Esc` sends the window away.** Nothing stops. The agent finishes what it
+  started and the answer is still spoken out loud. This is for when the question
+  turns out to be a long one and there is no reason to sit in front of the
+  window while it is computed.
+- **`I` interrupts** an answer that is running long. It also lets go of the key,
+  which matters when a release was never delivered.
+- **`N` forgets** the conversation and starts clean.
+- **Holding `F10` while it is speaking** cuts the answer off and starts a new
+  question. The window's own button does the same.
 
-Nothing else ends a session. The Realtime API keeps the conversation on its
-connection and offers no way to clear it, so closing the socket is the only way
-to forget — which makes it the one thing that must never happen on its own. A
-connection that goes quiet is reported, never rebuilt: an earlier version
-rebuilt it automatically and spent its time cutting short conversations that
-were going fine.
-- **`I` interrupts** an answer that is running long, without leaving the
-  conversation.
-
-All three are letters rather than chords: the panel takes the keyboard
-exclusively, so any system-wide combination assigned elsewhere would simply
-vanish here. `Ctrl+Space`, for one, is Omarchy's dictation key.
-
-**Backgrounding changes nothing at all.** The microphone stays open, the
-conversation carries on, answers are still spoken. Hiding a window is not the
-same as ending a conversation, and it should not have to be explained which one
-you meant.
-
-An earlier version released the microphone here, reasoning that a session
-listening with no window on screen is a privacy question and a billing one.
-Both are real, and both belong to the person rather than to this program —
-having to reopen a panel in order to be heard made the panel the point instead
-of the talking. `Q` stops everything when stopping is what is wanted, and
-without forgetting the conversation.
+All of them are plain letters rather than chords, because the window has no
+text entry to compete with — and because a system-wide combination assigned
+elsewhere would simply vanish here. `Ctrl+Space`, for one, is Omarchy's
+dictation key, and `F9` stays voxtype's.
 
 When you return you can see what happened while you were away: the daemon keeps
-the last fourteen waterfall lines and replays them to a newly opened panel along
-with the answer. An empty log after coming back would hide exactly the work the
-panel was minimised for.
+the last fourteen waterfall lines and replays them to a newly opened window
+along with the answer. An empty log after coming back would hide exactly the
+work the window was dismissed for.
 
 ### A new conversation
 
-`N` in the panel wipes the context and starts clean. Three separate memories
-have to be forgotten, or "forget everything" only half works:
+`N` wipes the context and starts clean. Two memories have to be forgotten, or
+"forget everything" only half works:
 
-- the conversation in the Realtime API, which lives on the connection;
 - the agent's thread, which `codex`/`claude` resume by id;
-- the transcript and the waterfall in the panel itself.
+- the transcript and the waterfall in the window itself.
 
-The Realtime API cannot clear its history: items are deleted one at a time by
-id. So the honest way is to reconnect, which is what happens. It costs a second
-or two and leaves no doubt about what it still remembers. The voice, the agent
-and the key survive it.
+There used to be a third — the conversation the Realtime API kept on its
+connection, which could only be cleared by reconnecting. There is no connection
+now, so there is nothing to reconnect. The voice, the folder and the grants
+survive it.
 
 ### The waterfall
 
@@ -274,15 +314,21 @@ was heard, what was asked of the agent, how long it thought, what it answered.
 New on top, old sinking and fading.
 
 ```
-22:48:31  ←  There are 8 plugins in the directory   codex · 9.9s
-22:48:21  →  How many plugins in omarchy?           codex
+22:48:31  ←  There are 8 plugins in the directory   claude · 9.9s
+22:48:21  →  How many plugins in omarchy?           claude
 22:48:19  ‹  how many plugins do i have
-22:48:12  ◆  gpt-realtime-2.1-mini
 ```
 
-While the agent works, the top line counts out loud — `codex · 6.9s` and on.
-Waiting ten seconds is fine when you can see what is being computed; the same
-ten seconds facing a pulsing dot feel like a failure.
+While the agent works, the status line counts — `Working · 1m 20s` — and its own
+narration shows faintly behind the waveform: the tool it reached for, the
+sentence it just wrote. Waiting two minutes is fine when you can see what is
+being computed; the same two minutes facing a still panel feel like a hang.
+
+That narration is also how a stuck question is told from a slow one. The daemon
+ends a question after two minutes of **complete silence** from the agent rather
+than after a fixed wall-clock limit, so an answer that is still working never
+gets cut off however long it takes (`OMAVOICE_BRAIN_IDLE`, and
+`OMAVOICE_BRAIN_TIMEOUT` as a fifteen-minute backstop).
 
 The arrows are literal: `‹` inbound from the microphone, `→` out to the agent,
 `←` back from it, `›` out to the speakers.
@@ -305,18 +351,21 @@ bash ~/.config/omarchy/plugins/io.github.baranskyi.omavoice/scripts/uninstall.sh
 omarchy plugin remove io.github.baranskyi.omavoice
 ```
 
-The script stops and removes the systemd unit, deletes the virtualenv under
-`~/.local/share/omavoice/`, and removes the `omavoice-ctl` symlink
-from `~/.local/bin` if it put one there.
+The script stops and removes the systemd unit, deletes the virtualenv at
+`~/.local/share/omavoice/venv`, and removes the `omavoice-ctl` symlink from
+`~/.local/bin` if it put one there.
 
-Two things are left behind on purpose, and it tells you so:
+Three things are left behind on purpose, and it tells you so:
 
-- `~/.config/omavoice/env` — your API key.
+- `~/.local/share/omavoice/kokoro/` — the voice model, 339 MB. It is not
+  configuration, and re-downloading it because a virtualenv was removed would
+  be a poor trade.
+- `~/.config/omavoice/env` — your settings, if you wrote any.
 - `~/.config/pipewire/pipewire.conf.d/99-omavoice-echo-cancel.conf` — echo
   cancellation, which other things on the machine may be relying on by now.
 
-Delete either by hand once you are sure. Also drop the `bindings.lua` line if
-you added one.
+Delete any of them by hand once you are sure. Also drop the two `bindings.lua`
+lines if you added them.
 
 ## Development
 
@@ -330,27 +379,41 @@ make logs       # journalctl for the daemon
 The parts are testable separately, bottom up:
 
 ```bash
-# the audio path, no network and no key
+# what is installed and what is missing
+bin/omavoice-check                 # or --json, which is what the tour reads
+
+# the audio path, no agent
 ~/.local/share/omavoice/venv/bin/python -m omavoice.audio --loopback
 
 # the brain, no microphone
 ~/.local/share/omavoice/venv/bin/python -m omavoice.brain "how much disk space?"
 
-# the voice, no panel
-~/.local/share/omavoice/venv/bin/python -m omavoice --headless
+# the voice, no panel and no microphone
+echo "testing one two" | ~/.local/share/omavoice/venv/bin/python -m omavoice.tts_worker --voice af_heart | \
+  pw-play --rate=24000 --channels=1 --format=s16 --raw -
+
+# a whole turn, in writing
+bin/omavoice-ctl ask "how many plugins do i have"
 ```
 
-Four traps that cost time:
+The daemon deliberately imports nothing outside the standard library, and that
+is worth keeping: it means it runs before anything is installed, which is what
+lets the tour report what is missing. Check it after touching imports:
 
-- **`keepalive ping timeout` in the middle of a long answer.** The socket read
-  loop must never be made to wait on the speakers. The model delivers an answer
-  much faster than it is spoken, and writing into `pw-play` straight from
-  `async for raw in ws` means that on a full buffer `drain()` stops the reading:
-  incoming frames pile up, the keepalive ping goes unanswered, and the library
-  tears the connection down from the inside — code 1011, by itself, mid
-  sentence. The longer the answer, the surer it is. The cure is decoupling:
-  `_on_audio` only enqueues, and a separate task drains the queue into the
-  speakers. Verified against 49 seconds of continuous speech.
+```bash
+PYTHONPATH=daemon /usr/bin/python3 -c "import omavoice.__main__"
+```
+
+Traps that cost time:
+
+- **`compileall` will not catch a missing import.** `make lint` is
+  `compileall`, which proves the file parses and nothing more — a name used but
+  never imported passes it and fails at runtime, inside a handler, as a
+  question that silently does nothing. Import the module and exercise the path.
+- **Kokoro's `create_stream` does not stream.** It returns nothing until the
+  whole text is synthesised, so a 22-second answer sat silent for 8.3 s. The
+  worker splits sentences itself and calls `create()` per sentence, which makes
+  the wait the length of the *first* sentence however long the answer runs.
 - **The QML engine caches compiled types**, and editing a file that is not an
   entry point (`Waveform.qml`) is picked up neither by saving nor by
   `rescanPlugins`. It needs `omarchy-restart-shell`. If a QML error points at a
@@ -360,19 +423,27 @@ Four traps that cost time:
   (`bin/python`, `lib64`). That is why the environment lives under
   `~/.local/share/omavoice/` and the daemon is reached through
   `PYTHONPATH`.
-- **When the assistant behaves strangely, the first question is what it thinks
-  it heard.** `journalctl --user -u omavoice | grep -E "heard:|said:"`
-  answers it immediately: if `heard:` contains its own last sentence, echo is
-  leaking; if it is incoherent junk, the gate is set too low.
+- **When it behaves strangely, the first question is what it thinks it heard.**
+  `journalctl --user -u omavoice | grep -E "held |heard:"` answers it
+  immediately: if `heard:` contains its own last sentence, echo is leaking; if
+  it is fluent nonsense from a quiet room, look at `peak` on the `held` line
+  before anything else — see the gain note above.
+- **`pgrep -f` matches the shell that ran it**, and `setsid nohup … &` gives
+  `$!` the wrapper's pid rather than the daemon's. Both of those kill the wrong
+  process and leave the real one running. Match on the exact argv instead.
 
 ## Layout
 
 ```
 manifest.json       kinds: overlay + bar-widget, keepLoaded
-Overlay.qml         the panel, layer-shell above everything
-SettingsWindow.qml  settings in their own window: key, voice, agent
+Overlay.qml         the window, and the four screens inside it
+SettingsWindow.qml  voice, agent, audio input, access
+OnboardingWindow.qml the six-card tour, including the setup checks
+ConsentWindow.qml   the folder and the per-agent grants
+HelpWindow.qml      how it works, in the window
 Waveform.qml        a figure of points on a Canvas
 EventLog.qml        the event waterfall
+Undertext.qml       the agent's narration, behind the figure
 PrimeRadiant.qml    the logo and the bar icon
 AgentBadge.qml      the vendor badge
 BarWidget.qml       the state icon
@@ -380,17 +451,21 @@ Client.qml          socket and state
 
 daemon/omavoice/
   __main__.py   the state machine, where everything is joined
-  realtime.py   WebSocket to the Realtime API, the "voice, not brain" prompt
-  audio.py      pw-record / pw-play, RMS, interruption
-  brain.py      codex exec / claude -p, parsing the answer
+  listen.py     the held audio, the WAV, voxtype
+  speak.py      supervises the voice worker
+  tts_worker.py Kokoro, spawned per utterance and gone again
+  audio.py      pw-record / pw-play, RMS, the gate, AutoGain
+  brain.py      claude -p / codex exec, parsing the answer
+  herdr.py      what the desktop is doing, as context
+  devices.py    which microphone and which sink, and why
   ipc.py        Unix socket, NDJSON, broadcast
   ctl.py        omavoice-ctl
   schemas/answer.json   the shape of the agent's answer
 
 systemd/    the user unit, as a template setup.sh fills in
 pipewire/   the echo cancellation config
-scripts/    setup.sh, uninstall.sh
-bin/        omavoice-ctl
+scripts/    setup.sh (venv, models, unit, pipewire, ctl), uninstall.sh
+bin/        omavoice-ctl, omavoice-ptt, omavoice-check
 ```
 
 ## Security and privacy
@@ -401,9 +476,14 @@ draw a widget. Plainly, what it does:
 - **It installs a systemd user unit** (`omavoice.service`) that runs a
   Python daemon. `setup.sh` writes it; nothing is enabled without you running
   `systemctl --user enable`.
-- **It records audio** while a session is open, and streams it to the OpenAI
-  Realtime API. The microphone is released the moment the panel goes to the
-  background or the session ends.
+- **It records audio only while you hold the key**, and never sends it
+  anywhere. The recording is written to a mode-600 file in `$XDG_RUNTIME_DIR`,
+  handed to `voxtype` on this machine, and unlinked the moment it is text. The
+  microphone is closed on the key release, on cancel, and if the daemon stops.
+  There is no session and no connection: between turns nothing is listening.
+- **The daemon opens no outbound connection at all.** It authenticates to
+  nothing, holds no credential, and has none to hold. Whether anything reaches
+  the network at all is entirely a question about the agent you allow, below.
 - **Nothing is asked of an agent until you have said so.** On first run the
   panel asks for a folder and for permission, and refuses every request until
   both are answered. Permission is per agent, by name — allowing `codex` says
@@ -466,23 +546,33 @@ draw a widget. Plainly, what it does:
   not against an attacker: it is a pattern match over a transcript, and "delete
   everything in my home directory" walks straight through it. What actually
   prevents the damage is that a bounded agent cannot write at all.
-- **The key** lives in `~/.config/omavoice/key`, mode `600`, in a file of its
-  own that systemd does not load. It is read once by the daemon and removed
-  from the process environment immediately, so no child inherits it — not the
-  agent, not `pw-record`, not `pactl`. That last part matters more than it
-  sounds: an environment variable is not a secret on a shared UID, because
-  `/proc/<pid>/environ` keeps the copy a process started with and anything
-  running as the same user can read it. An earlier version passed the key in
-  through the environment and claimed it was visible only to the unit, which
-  was not true.
+- **There is no key.** Earlier versions kept an OpenAI credential in
+  `~/.config/omavoice/key`, mode 600, and went to some trouble to keep it out of
+  the environment so no child could inherit it. None of that is needed now: the
+  hearing and the speaking are local, and the agent uses the subscription you
+  have already logged into. `OPENAI_API_KEY` is deliberately **not** stripped
+  from the daemon's environment any more — if one is there it belongs to
+  whoever put it there, most likely codex, and taking it away would be this
+  program breaking something that is not its business.
+- **Each question is a fresh process.** `claude -p` and `codex exec` are spawned
+  per question and exit when they answer, which is what makes
+  `--setting-sources ""` a boundary rather than a gesture: the reset happens
+  every time, not once. It also means the agent cannot wait for anything or
+  report back later, and it is told so in its system prompt — it used to promise
+  otherwise, having messaged another session whose reply arrived after it had
+  already exited.
+- **The framing is a system prompt, not part of the question.** What arrives
+  from whisper is untrusted text and frequently garbled; rules that have to hold
+  are appended to the system prompt rather than sitting in the same message as
+  the input they govern.
 - **While the agent works, its own narration and the commands it runs appear
-  faintly behind the waveform.** They are streamed from `codex exec --json` as
-  the lines arrive, shown, and dropped — never stored, and never replayed to a
-  panel that opens later, since that would show someone an agent working on a
-  question answered minutes ago. Each line is trimmed to 180 characters, and
-  the ceiling on the pipe it comes from is unchanged. `claude -p` emits its
-  output as a single document at the end rather than a stream, so it has no
-  equivalent yet.
+  faintly behind the waveform.** They are streamed as the lines arrive, shown,
+  and dropped — never stored, and never replayed to a window that opens later,
+  since that would show someone an agent working on a question answered minutes
+  ago. Each line is trimmed to 180 characters, and the ceiling on the pipe it
+  comes from is unchanged. Both backends now stream: `codex exec --json`, and
+  `claude --output-format stream-json`, which also gives the daemon the only
+  evidence that a long question is still alive rather than wedged.
 - **What the agent hands back is bounded before it is kept.** The daemon runs
   for weeks and the agent it starts runs for a minute, so everything the short
   process writes would otherwise be held in the long one and pushed to the
@@ -503,24 +593,31 @@ draw a widget. Plainly, what it does:
   v0.9.0; the reference form renders in Qt and was getting through.
 - **No `sudo`, no `curl | sh`, no package installation outside the virtualenv.**
 
-## Cost
+## What it costs
 
-You pay for the voice only. The brain runs on a subscription.
+Nothing per minute, and nothing per question. There is no key, no meter and no
+audio on any wire — the hearing, the speaking and the thinking all run on
+hardware you already own, against a subscription you already pay for.
 
-| Model | Per minute of conversation |
+What it costs is CPU and a little disk. Measured on an i7-1065G7, four cores:
+
+| | |
 |---|---|
-| `gpt-realtime-2.1-mini` | ~$0.016 |
-| `gpt-realtime-2.1` | ~$0.05 |
+| voxtype `base.en` | 1.35 s for 6.6 s of audio (about a fifth of real time) |
+| Kokoro fp32, 4 threads | about a third of playback time — 3x faster than it speaks |
+| Kokoro cold start to first word | 1.52 s |
+| Kokoro peak memory while speaking | 534 MB |
+| Kokoro memory when idle | **0** — the worker is spawned per answer and exits |
+| Disk | 339 MB of model, plus the virtualenv |
 
-Answer latency is 9–30 seconds depending on the question: that is what starting
-codex and letting it walk the filesystem costs. Realtime covers the pause with a
-short filler ("one second, looking"), but on simple questions it is noticeable.
-Reasoning effort is pinned to `low`; `none` is slower on this model — the agent
-compensates with extra tool calls — and `minimal` is refused.
+Kokoro at **fp32** rather than int8 is not an oversight. The quantised model is
+89 MB against 311 MB and is slower than playback on this CPU — RTF 1.49 against
+0.36 — despite the machine having AVX-512 VNNI. Four threads beat eight;
+hyperthreading hurts.
 
-If the bill is noticeably higher than this, it means Realtime is answering by
-itself instead of calling `ask_agent`, and the thing to fix is the prompt in
-`realtime.py`.
+What dominates a turn is none of the above: the agent does. Speech in and out
+costs roughly two and a half seconds together, and the agent takes as long as
+the question deserves.
 
 ## License
 
